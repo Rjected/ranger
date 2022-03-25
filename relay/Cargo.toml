@@ -1,0 +1,50 @@
+[package]
+name = "relay"
+version = "0.1.0"
+authors = ["Dan Cline <danieledwardcline@gmail.com>"]
+edition = "2018"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+documentation = "https://docs.rs/ranger"
+repository = "https://github.com/Rjected/ranger"
+homepage = "https://docs.rs/ranger"
+description = """
+Ranger uses akula to listen to the network and provide subscription APIs for
+listening to and processing network messages, as well as converting them to
+ethers-rs types
+"""
+
+[dependencies]
+ethers = { git = "https://github.com/Rjected/ethers-rs", features = ["abigen", "legacy", "ws"], branch = "p2p_txpool" }
+serde = { version = "1.0.126", features = ["derive"] }
+
+# TODO: condense extra features needed and determine if necessary, or if they
+# can be upstreamed
+tracing = { version = "0.1.29", default-features = false }
+akula = { git = "https://github.com/Rjected/akula", branch = "simple-relayer" }
+fastrlp = { git = "https://github.com/Rjected/fastrlp", branch = "implement-ethereum-types" }
+ethereum-forkid = { version = "0.7.0", default-features = false }
+rlp-derive = { version = "0.1.0", default-features = false }
+rlp = { version = "0.5.1", default-features = false }
+futures-core = { version = "0.3.21" }
+async-stream = { version = "0.3.2" }
+tokio-stream = { version = "0.1" }
+parking_lot = { version = "0.12.0", default-features = false }
+bytes = { version = "1.1", default-features = false }
+tracing-subscriber = { version = "0.3", default-features = false }
+trust-dns-resolver = { version = "0.20" }
+# determine if necessary
+task-group = { git = "https://github.com/vorot93/task-group" }
+hex = { version = "0.4" }
+clap = { version = "3.1.5" }
+anyhow = { version = "1.0" }
+ethereum-types = { version = "0.13.1" }
+fdlimit = { version = "0.2" }
+cidr = { version = "0.2.1" }
+maplit = { version = "1.0.2" }
+secp256k1 = { version = "0.22" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.5" }
+
+[lib]

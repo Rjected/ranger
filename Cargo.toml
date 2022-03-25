@@ -1,0 +1,27 @@
+[package]
+name = "ranger"
+version = "0.1.0"
+authors = ["Dan Cline <danieledwardcline@gmail.com>"]
+license = "MIT OR Apache-2.0"
+edition = "2021"
+readme = "README.md"
+documentation = "https://docs.rs/ranger"
+repository = "https://github.com/rjected/ranger"
+homepage = "https://docs.rs/rjected"
+description = """
+P2P utilities for use with ethers-rs types and tooling
+"""
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[workspace]
+members = [
+    "cli",
+    "relay"
+]
+
+# Workaround - these are needed for akula to work as a dependency, since akula
+# itself uses these patches
+[patch.crates-io]
+enr = { git = "https://github.com/rust-ethereum/enr", branch = "vorot93/update-deps" }
+ethnum = { git = "https://github.com/vorot93/ethnum-rs", branch = "staging" }
+arrayvec = { git = "https://github.com/vorot93/arrayvec", branch = "pop-unchecked" }
