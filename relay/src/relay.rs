@@ -1,18 +1,17 @@
 use async_stream::stream;
 use async_trait::async_trait;
-use rlp::{Decodable, Rlp, Encodable};
 use thiserror::Error;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use ethereum_types::{H256, U256, U64};
 use akula::{
-    sentry_connector::{messages::{Message, EthMessageId, StatusMessage, GetBlockBodiesMessage, GetPooledTransactionsMessage, NewPooledTransactionHashesMessage}, message_decoder::decode_rlp_message},
+    sentry_connector::{messages::{Message, EthMessageId, StatusMessage, GetBlockBodiesMessage, GetPooledTransactionsMessage, NewPooledTransactionHashesMessage}, message_decoder::*},
     sentry::{
         devp2p::{CapabilityName, CapabilityVersion, InboundEvent, OutboundEvent, PeerId, CapabilityServer, DisconnectReason, Message as DevP2PMessage},
         eth::{EthProtocolVersion, capability_name},
     }, models::{MessageWithSignature, TxType},
 };
 use secp256k1::rand::random;
-use ethers_core::{types::{Signature, H512, Chain, ParseChainError, transaction::{eip2718::TypedTransaction, eip2930::AccessListItem}, Transaction, TransactionRequest, Eip2930TransactionRequest, Eip1559TransactionRequest, NameOrAddress}};
+use ethers::core::{types::{Signature, H512, Chain, ParseChainError, transaction::{eip2718::TypedTransaction, eip2930::AccessListItem}, Transaction, TransactionRequest, Eip2930TransactionRequest, Eip1559TransactionRequest, NameOrAddress}};
 use futures_core::stream::BoxStream;
 use parking_lot::RwLock;
 use std::{
@@ -30,6 +29,7 @@ use tokio::sync::{
     mpsc::{channel, Sender, error::SendTimeoutError},
     Mutex as AsyncMutex,
 };
+use fastrlp::Encodable as FastEncodable;
 use tokio_stream::StreamExt;
 use tracing::{debug, warn, info};
 
@@ -211,14 +211,22 @@ impl P2PRelay {
     pub async fn send_to_peer(&self, peer: PeerId, eth_message: Message) -> Result<(), P2PRelayError> {
         let sender_pipe = self.sender(peer).ok_or(P2PRelayError::CannotFindPeer)?;
 
-        // TODO: figure out what an appropriate timeout would be - should we even use timeouts?
-        sender_pipe.send_timeout(OutboundEvent::Message {
+        let mut message_data = BytesMut::new();
+        eth_message.encode(&mut message_data);
+
+        let prepared_message = OutboundEvent::Message {
             capability_name: capability_name(),
             message: DevP2PMessage {
                 id: eth_message.eth_id() as usize,
-                data: rlp::encode(&eth_message).into(),
+                data: message_data.freeze(),
             },
-        }, Duration::from_millis(20)).await.map_err(P2PRelayError::SendTimeout)?;
+        };
+
+        // TODO: figure out what an appropriate timeout would be - should we even use timeouts?
+        sender_pipe.send_timeout(prepared_message, Duration::from_millis(20))
+            .await
+            .map_err(P2PRelayError::SendTimeout)?;
+
         Ok(())
     }
 
@@ -256,51 +264,50 @@ impl P2PRelay {
 
     /// Handles a devp2p message with a peer id and payload.
     async fn handle_eth_message(&self, peer: PeerId, message: Message) -> Result<(), P2PRelayError> {
-        // TODO: document InboundEvent Message vs sentry_connector Message vs devp2p::types
-        // Message
-        //
-        // This method really just matches on a message type and inserts into this global state.
+        // This method just matches on a message type and processes it
         match message {
             Message::Status(status) => {
                 // currently all this does is track the highest difficulty (as claimed by the
                 // peer) status message for each chain.
-                debug!("✨ Decoded status message from {}: {:?}", peer, status);
+                debug!("Decoded status message from {}: {:?}", peer, status);
+                let status_difficulty = U256::from_big_endian(&status.total_difficulty.to_be_bytes());
+
                 // If the status message has a higher total difficulty then we save it with other
                 // status messages
                 let chain = Chain::try_from(status.network_id)?;
                 let mut total_work = self.total_work_map.write();
                 match total_work.get(&chain) {
                     Some(total_difficulty) => {
-                        if status.total_difficulty > *total_difficulty {
+                        if status_difficulty > *total_difficulty {
                             let mut status_map = self.status_map.write();
-                            total_work.insert(chain, status.total_difficulty);
+                            total_work.insert(chain, status_difficulty);
                             status_map.insert(chain, status);
                         }
                     }
                     None => {
                         let mut status_map = self.status_map.write();
-                        total_work.insert(chain, status.total_difficulty);
+                        total_work.insert(chain, status_difficulty);
                         status_map.insert(chain, status);
                     }
                 }
             }
             Message::BlockBodies(block_bodies) => {
-                debug!("🌹 Decoded block bodies message from {}: {:?}", peer, block_bodies);
+                debug!("Decoded block bodies message from {}: {:?}", peer, block_bodies);
             }
             Message::NewPooledTransactionHashes(new_pooled_transactions) => {
                 let num_txs_to_show = 8;
-                if new_pooled_transactions.ids.len() >= num_txs_to_show {
-                    let slice = new_pooled_transactions.ids.split_at(num_txs_to_show).0;
-                    debug!("🌹 {:?} NEW POOLED TX HASHES FROM {}! Here are {:?} of them: {:?}", new_pooled_transactions.ids.len(), peer, num_txs_to_show, slice);
+                if new_pooled_transactions.0.len() >= num_txs_to_show {
+                    let slice = new_pooled_transactions.0.split_at(num_txs_to_show).0;
+                    debug!("{:?} NEW POOLED TX HASHES FROM {}! Here are {:?} of them: {:?}", new_pooled_transactions.0.len(), peer, num_txs_to_show, slice);
                 } else {
-                    debug!("🌹 {:?} NEW POOLED TX HASHES FROM {}! Here are all of them: {:?}", new_pooled_transactions.ids.len(), peer, new_pooled_transactions.ids);
+                    debug!("{:?} NEW POOLED TX HASHES FROM {}! Here are all of them: {:?}", new_pooled_transactions.0.len(), peer, new_pooled_transactions.0);
                 }
 
                 // filter transactions that we've seen out of the request - we put this in its own
                 // block so the lock isn't held across an await
                 let filtered_txids: Vec<H256> = {
                     let seen_txids = self.new_transactions.read();
-                    new_pooled_transactions.ids.iter().filter_map(|seen| (!seen_txids.contains_key(seen)).then(|| *seen)).collect()
+                    new_pooled_transactions.0.iter().filter_map(|seen| (!seen_txids.contains_key(seen)).then(|| *seen)).collect()
                 };
 
                 // TODO: how to ensure that we get a transaction body for every corresponding tx
@@ -347,9 +354,9 @@ impl P2PRelay {
             // A peer may respond with an empty list if none of the hashes match transactions in
             // its pool.
             Message::PooledTransactions(pooled_transactions) => {
-                // debug!("🌹 pooled transactions: {:?}", pooled_transactions);
+
                 let num_txs = pooled_transactions.transactions.len();
-                info!("🌹 got {:?} pooled transactions from {}", num_txs, peer);
+                info!("got {:?} pooled transactions from {}", num_txs, peer);
 
                 for transaction in pooled_transactions.transactions {
                     let (typed_tx, sig) = transaction_from_message(transaction.clone()).unwrap();
@@ -359,37 +366,37 @@ impl P2PRelay {
                 }
             }
             Message::NewBlock(new_block) => {
-                debug!("🌹 new block: {:?} from {}", new_block, peer);
+                debug!("new block: {:?} from {}", new_block, peer);
             }
             Message::BlockHeaders(block_headers) => {
-                debug!("🌹 {:?} new block headers from {}", block_headers.headers.len(), peer);
+                debug!("{:?} new block headers from {}", block_headers.headers.len(), peer);
             }
             Message::NewBlockHashes(new_block_hashes) => {
-                debug!("🌹 new block hashes from {}: {:?}", peer, new_block_hashes);
+                debug!("new block hashes from {}: {:?}", peer, new_block_hashes);
             }
             Message::Transactions(transactions) => {
-                debug!("🌹 transactions from {}: {:?}", peer, transactions);
+                debug!("transactions from {}: {:?}", peer, transactions);
             }
             Message::NodeData(node_data) => {
-                debug!("🌹 node data from {}: {:?}", peer, node_data);
+                debug!("node data from {}: {:?}", peer, node_data);
             }
             Message::Receipts(receipts) => {
-                debug!("🌹 receipts from {}: {:?}", peer, receipts);
+                debug!("receipts from {}: {:?}", peer, receipts);
             }
             Message::GetReceipts(get_receipts) => {
-                debug!("😭 get receipts from {}: {:?}", peer, get_receipts);
+                debug!("get receipts from {}: {:?}", peer, get_receipts);
             }
             Message::GetPooledTransactions(get_pooled_transactions) => {
-                debug!("😭 get pooled transactions from {}: {:?}", peer, get_pooled_transactions);
+                debug!("get pooled transactions from {}: {:?}", peer, get_pooled_transactions);
             }
             Message::GetBlockBodies(get_block_bodies) => {
-                debug!("😭 get block bodes from {}: {:?}", peer, get_block_bodies);
+                debug!("get block bodes from {}: {:?}", peer, get_block_bodies);
             }
             Message::GetBlockHeaders(get_block_headers) => {
-                debug!("😭 get block headers from {}: {:?}", peer, get_block_headers);
+                debug!("get block headers from {}: {:?}", peer, get_block_headers);
             }
             Message::GetNodeData(get_node_data) => {
-                debug!("😭 get node data from {}: {:?}", peer, get_node_data);
+                debug!("get node data from {}: {:?}", peer, get_node_data);
             }
 
             // We may want to prevent peering with our own relay nodes. To accomplish
@@ -502,12 +509,13 @@ impl CapabilityServer for P2PRelay {
     fn on_peer_connect(&self, peer: PeerId, caps: HashMap<CapabilityName, CapabilityVersion>) {
         let first_events = if let Some(status_message) = &*self.status_message.read()
         {
-
+            let mut status_data = BytesMut::new();
+            status_message.encode(&mut status_data);
             vec![OutboundEvent::Message {
                 capability_name: capability_name(),
                 message: DevP2PMessage {
                     id: EthMessageId::Status as usize,
-                    data: rlp::encode(status_message).into(),
+                    data: status_data.freeze(),
                 },
             }]
         } else {

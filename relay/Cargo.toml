@@ -15,14 +15,20 @@ ethers-rs types
 """
 
 [dependencies]
-ethers = { git = "https://github.com/Rjected/ethers-rs", features = ["abigen", "legacy", "ws"], branch = "p2p_txpool" }
+ethers = { git = "https://github.com/Rjected/ethers-rs", features = ["abigen", "legacy", "ws"], branch = "signed_transaction_decoding" }
 serde = { version = "1.0.126", features = ["derive"] }
 
 # TODO: condense extra features needed and determine if necessary, or if they
 # can be upstreamed
+async-trait = "0.1"
 tracing = { version = "0.1.29", default-features = false }
+fastrlp = { git = "https://github.com/Rjected/fastrlp", branch = "relayer-branch", features = [
+    "derive",
+    "ethereum-types",
+    "ethnum",
+    "std",
+] }
 akula = { git = "https://github.com/Rjected/akula", branch = "simple-relayer" }
-fastrlp = { git = "https://github.com/Rjected/fastrlp", branch = "implement-ethereum-types" }
 ethereum-forkid = { version = "0.7.0", default-features = false }
 rlp-derive = { version = "0.1.0", default-features = false }
 rlp = { version = "0.5.1", default-features = false }
@@ -33,6 +39,8 @@ parking_lot = { version = "0.12.0", default-features = false }
 bytes = { version = "1.1", default-features = false }
 tracing-subscriber = { version = "0.3", default-features = false }
 trust-dns-resolver = { version = "0.20" }
+thiserror = "1"
+
 # determine if necessary
 task-group = { git = "https://github.com/vorot93/task-group" }
 hex = { version = "0.4" }

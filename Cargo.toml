@@ -19,9 +19,18 @@ members = [
     "relay"
 ]
 
+[dependencies]
+relay = { version = "^0.1.0", default-features = false, path = "./relay" }
+
 # Workaround - these are needed for akula to work as a dependency, since akula
 # itself uses these patches
 [patch.crates-io]
 enr = { git = "https://github.com/rust-ethereum/enr", branch = "vorot93/update-deps" }
 ethnum = { git = "https://github.com/vorot93/ethnum-rs", branch = "staging" }
 arrayvec = { git = "https://github.com/vorot93/arrayvec", branch = "pop-unchecked" }
+fastrlp = { git = "https://github.com/Rjected/fastrlp", branch = "relayer-branch", features = [
+    "derive",
+    "ethereum-types",
+    "ethnum",
+    "std",
+] }
