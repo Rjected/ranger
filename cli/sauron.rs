@@ -1,29 +1,31 @@
-use cidr::IpCidr;
-use maplit::btreemap;
-use tracing_subscriber::{EnvFilter, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
-use anyhow::Context;
-use secp256k1::{PublicKey, SecretKey, SECP256K1};
-use tokio_stream::StreamMap;
-use task_group::TaskGroup;
-use std::collections::HashMap;
-use tokio::time::sleep;
-use tracing::{info, warn, trace};
-use clap::Parser;
-use ethereum_types::{U256, H256};
 use akula::{
-    sentry_connector::messages::StatusMessage,
     sentry::{
         devp2p::{
-            Discovery, Swarm, ListenOptions, StaticNodes, CapabilityId, CapabilityVersion, Discv4, Discv4Builder, NodeRecord as RLPNodeRecord, v4::NodeRecord
+            v4::NodeRecord, CapabilityId, CapabilityVersion, Discovery, Discv4, Discv4Builder,
+            DnsDiscovery, ListenOptions, NodeRecord as RLPNodeRecord, StaticNodes, Swarm,
         },
-        eth::{EthProtocolVersion, capability_name},
+        eth::{capability_name, EthProtocolVersion},
     },
+    sentry_connector::messages::StatusMessage,
 };
+use anyhow::Context;
+use cidr::IpCidr;
+use clap::Parser;
 use ethereum_forkid::{ForkHash, ForkId};
-use std::{
-    num::NonZeroUsize, path::PathBuf, str::FromStr, sync::Arc, time::Duration,
-};
+use ethereum_types::{H256, U256};
+use maplit::btreemap;
 use ranger::relay::P2PRelay;
+use secp256k1::{PublicKey, SecretKey, SECP256K1};
+use std::collections::HashMap;
+use std::{num::NonZeroUsize, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use task_group::TaskGroup;
+use tokio::time::sleep;
+use tokio_stream::StreamMap;
+use tracing::{info, trace, warn};
+use tracing_subscriber::{
+    prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter,
+};
+use trust_dns_resolver::TokioAsyncResolver;
 
 pub const BOOTNODES: &[&str] = &[
 	"enode://d860a01f9722d78051619d1e2351aba3f43f943f6f00718d1b9baa4101932a1f5011f16bb2b1bb35db20d6fe28fa0bf09636d26a87d31de9ec6203eeedb1f666@18.138.108.67:30303",   // bootnode-aws-ap-southeast-1-001
@@ -97,10 +99,7 @@ impl OptsDiscV4 {
     async fn make_task(self, secret_key: &SecretKey) -> anyhow::Result<Discv4> {
         info!("Starting discv4 at port {}", self.discv4_port);
 
-        let mut bootstrap_nodes = self
-            .discv4_bootnodes
-            .into_iter()
-            .collect::<Vec<_>>();
+        let mut bootstrap_nodes = self.discv4_bootnodes.into_iter().collect::<Vec<_>>();
 
         if bootstrap_nodes.is_empty() {
             bootstrap_nodes = BOOTNODES
@@ -138,9 +137,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_default()
         .is_empty()
     {
-        EnvFilter::new(
-            "sauron=trace,ethers=info,akula=info",
-        )
+        EnvFilter::new("sauron=trace,ranger=trace,akula=info,relay=trace")
     } else {
         EnvFilter::from_default_env()
     };
@@ -179,6 +176,16 @@ async fn main() -> anyhow::Result<()> {
     let mut discovery_tasks: StreamMap<String, Discovery> = StreamMap::new();
 
     if !opts.no_discovery {
+        if !opts.no_dns_discovery {
+            info!("Starting DNS discovery fetch from {}", opts.dnsdisc_address);
+
+            let dns_resolver = akula::sentry::devp2p::disc::dns::Resolver::new(Arc::new(
+                TokioAsyncResolver::tokio_from_system_conf()
+                    .context("Failed to start DNS resolver")?,
+            ));
+            let task = DnsDiscovery::new(Arc::new(dns_resolver), opts.dnsdisc_address, None);
+            discovery_tasks.insert("dnsdisc".to_string(), Box::pin(task));
+        }
 
         let task_opts = OptsDiscV4 {
             discv4_port: opts.discv4_port,
@@ -222,37 +229,57 @@ async fn main() -> anyhow::Result<()> {
     let _one_status_message = StatusMessage {
         protocol_version: EthProtocolVersion::Eth66 as usize,
         network_id: 1,
-        total_difficulty: akula::models::U256::from_str_radix("36206751599115524359527", 10).unwrap(),
-        best_hash: H256::from_str("0xfeb27336ca7923f8fab3bd617fcb6e75841538f71c1bcfc267d7838489d9e13d").unwrap(),
-        genesis_hash: H256::from_str("0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3").unwrap(),
+        total_difficulty: akula::models::U256::from_str_radix("36206751599115524359527", 10)
+            .unwrap(),
+        best_hash: H256::from_str(
+            "0xfeb27336ca7923f8fab3bd617fcb6e75841538f71c1bcfc267d7838489d9e13d",
+        )
+        .unwrap(),
+        genesis_hash: H256::from_str(
+            "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3",
+        )
+        .unwrap(),
         fork_id: ForkId {
             hash: ForkHash([0xb7, 0x15, 0x07, 0x7d]),
             next: 0,
-        }
+        },
     };
 
     let two_status_message = StatusMessage {
         protocol_version: EthProtocolVersion::Eth66 as usize,
         network_id: 1,
-        total_difficulty: akula::models::U256::from_str_radix("36206751599115524359527", 10).unwrap(),
-        best_hash: H256::from_str("0xdeb6f5f89b9592aa8efbf156d7287664cf43f2464d4d7580722dc0b8b80b94ee").unwrap(),
-        genesis_hash: H256::from_str("0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3").unwrap(),
+        total_difficulty: akula::models::U256::from_str_radix("36206751599115524359527", 10)
+            .unwrap(),
+        best_hash: H256::from_str(
+            "0xdeb6f5f89b9592aa8efbf156d7287664cf43f2464d4d7580722dc0b8b80b94ee",
+        )
+        .unwrap(),
+        genesis_hash: H256::from_str(
+            "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3",
+        )
+        .unwrap(),
         fork_id: ForkId {
             hash: ForkHash([0xb7, 0x15, 0x07, 0x7d]),
             next: 0,
-        }
+        },
     };
 
     let _another_status_message = StatusMessage {
         protocol_version: EthProtocolVersion::Eth66 as usize,
         network_id: 1,
         total_difficulty: akula::models::U256::from_str_radix("6088371363059432", 10).unwrap(),
-        best_hash: H256::from_str("0xce585e7a973311b8db0470a1739ab9eddb38d7edfe3562c5f9eae1d86518d816").unwrap(),
-        genesis_hash: H256::from_str("0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3").unwrap(),
+        best_hash: H256::from_str(
+            "0xce585e7a973311b8db0470a1739ab9eddb38d7edfe3562c5f9eae1d86518d816",
+        )
+        .unwrap(),
+        genesis_hash: H256::from_str(
+            "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3",
+        )
+        .unwrap(),
         fork_id: ForkId {
             hash: ForkHash([0xb7, 0x15, 0x07, 0x7d]),
             next: 0,
-        }
+        },
     };
 
     // tell the relay to use this status message

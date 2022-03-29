@@ -100,10 +100,6 @@ pub struct P2PRelay {
     //
     //  Also TODO: design the aggregator / deduplicator, and how the aggregator + other p2p relay
     //  nodes will interact with each other.
-    //
-    // =====
-    // The below comment might be obsolete
-    // =====
     /// Whether or not we should connect to any new peers.
     no_new_peers: Arc<AtomicBool>,
 }
