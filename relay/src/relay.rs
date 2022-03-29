@@ -1,31 +1,44 @@
+use akula::{
+    models::MessageWithSignature,
+    sentry::{
+        devp2p::{
+            CapabilityName, CapabilityServer, CapabilityVersion, DisconnectReason, InboundEvent,
+            Message as DevP2PMessage, OutboundEvent, PeerId,
+        },
+        eth::{capability_name, EthProtocolVersion},
+    },
+    sentry_connector::{
+        message_decoder::*,
+        messages::{EthMessageId, GetPooledTransactionsMessage, Message, StatusMessage},
+    },
+};
 use async_stream::stream;
 use async_trait::async_trait;
-use thiserror::Error;
 use bytes::BytesMut;
 use ethereum_types::{H256, U256, U64};
-use akula::{
-    sentry_connector::{messages::{Message, EthMessageId, StatusMessage, GetPooledTransactionsMessage}, message_decoder::*},
-    sentry::{
-        devp2p::{CapabilityName, CapabilityVersion, InboundEvent, OutboundEvent, PeerId, CapabilityServer, DisconnectReason, Message as DevP2PMessage},
-        eth::{EthProtocolVersion, capability_name},
-    }, models::MessageWithSignature,
+use ethers::core::types::{
+    transaction::{eip2718::TypedTransaction, eip2930::AccessListItem},
+    Chain, Eip1559TransactionRequest, Eip2930TransactionRequest, NameOrAddress, ParseChainError,
+    Signature, TransactionRequest, H512,
 };
-use ethers::core::types::{Signature, H512, Chain, ParseChainError, transaction::{eip2718::TypedTransaction, eip2930::AccessListItem}, TransactionRequest, Eip2930TransactionRequest, Eip1559TransactionRequest, NameOrAddress};
+use fastrlp::Encodable as FastEncodable;
 use futures_core::stream::BoxStream;
 use parking_lot::RwLock;
 use std::{
-    time::Duration,
     collections::{HashMap, HashSet},
+    convert::TryFrom,
     sync::{
-        atomic::{AtomicBool, Ordering, AtomicU32},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
-    }, usize, convert::TryFrom,
+    },
+    time::Duration,
+    usize,
 };
+use thiserror::Error;
 use tokio::sync::{
-    mpsc::{channel, Sender, error::SendTimeoutError},
+    mpsc::{channel, error::SendTimeoutError, Sender},
     Mutex as AsyncMutex,
 };
-use fastrlp::Encodable as FastEncodable;
 use tokio_stream::StreamExt;
 use tracing::{debug, info};
 
@@ -91,7 +104,6 @@ pub struct P2PRelay {
     // =====
     // The below comment might be obsolete
     // =====
-
     /// Whether or not we should connect to any new peers.
     no_new_peers: Arc<AtomicBool>,
 }
@@ -120,7 +132,7 @@ pub enum P2PRelayError {
     /// Thrown if we are trying to send a message to a peer that has been removed or cannot be
     /// found
     #[error("Cannot find peer or peer has been removed")]
-    CannotFindPeer
+    CannotFindPeer,
 }
 
 impl P2PRelay {
@@ -171,7 +183,11 @@ impl P2PRelay {
     }
 
     /// Send an eth message to a peer. This relies on the capability name that is currently active.
-    pub async fn send_to_peer(&self, peer: PeerId, eth_message: Message) -> Result<(), P2PRelayError> {
+    pub async fn send_to_peer(
+        &self,
+        peer: PeerId,
+        eth_message: Message,
+    ) -> Result<(), P2PRelayError> {
         let sender_pipe = self.sender(peer).ok_or(P2PRelayError::CannotFindPeer)?;
 
         let mut message_data = BytesMut::new();
@@ -186,7 +202,8 @@ impl P2PRelay {
         };
 
         // TODO: figure out what an appropriate timeout would be - should we even use timeouts?
-        sender_pipe.send_timeout(prepared_message, Duration::from_millis(20))
+        sender_pipe
+            .send_timeout(prepared_message, Duration::from_millis(20))
             .await
             .map_err(P2PRelayError::SendTimeout)?;
 
@@ -217,7 +234,11 @@ impl P2PRelay {
     async fn disconnect_peer(&self, peer: PeerId) {
         match self.sender(peer) {
             Some(sender) => {
-                let _ = sender.send(OutboundEvent::Disconnect { reason: DisconnectReason::ProtocolBreach }).await;
+                let _ = sender
+                    .send(OutboundEvent::Disconnect {
+                        reason: DisconnectReason::ProtocolBreach,
+                    })
+                    .await;
             }
             None => {
                 self.teardown_peer(peer);
@@ -226,7 +247,11 @@ impl P2PRelay {
     }
 
     /// Handles a devp2p message with a peer id and payload.
-    async fn handle_eth_message(&self, peer: PeerId, message: Message) -> Result<(), P2PRelayError> {
+    async fn handle_eth_message(
+        &self,
+        peer: PeerId,
+        message: Message,
+    ) -> Result<(), P2PRelayError> {
         // This method just matches on a message type and processes it
         match message {
             Message::Status(status) => {
@@ -235,7 +260,8 @@ impl P2PRelay {
                 // We could use this status message for future connections if we are sure it's
                 // correct
                 debug!("Decoded status message from {}: {:?}", peer, status);
-                let status_difficulty = U256::from_big_endian(&status.total_difficulty.to_be_bytes());
+                let status_difficulty =
+                    U256::from_big_endian(&status.total_difficulty.to_be_bytes());
 
                 // If the status message has a higher total difficulty then we save it with other
                 // status messages
@@ -257,52 +283,80 @@ impl P2PRelay {
                 }
             }
             Message::BlockBodies(block_bodies) => {
-                debug!("Decoded block bodies message from {}: {:?}", peer, block_bodies);
+                debug!(
+                    "Decoded block bodies message from {}: {:?}",
+                    peer, block_bodies
+                );
             }
             Message::NewPooledTransactionHashes(new_pooled_transactions) => {
                 let num_txs_to_show = 8;
                 if new_pooled_transactions.0.len() >= num_txs_to_show {
                     let slice = new_pooled_transactions.0.split_at(num_txs_to_show).0;
-                    debug!("{:?} NEW POOLED TX HASHES FROM {}! Here are {:?} of them: {:?}",
-                        new_pooled_transactions.0.len(), peer, num_txs_to_show, slice);
+                    debug!(
+                        "{:?} NEW POOLED TX HASHES FROM {}! Here are {:?} of them: {:?}",
+                        new_pooled_transactions.0.len(),
+                        peer,
+                        num_txs_to_show,
+                        slice
+                    );
                 } else {
-                    debug!("{:?} NEW POOLED TX HASHES FROM {}! Here are all of them: {:?}",
-                        new_pooled_transactions.0.len(), peer, new_pooled_transactions.0);
+                    debug!(
+                        "{:?} NEW POOLED TX HASHES FROM {}! Here are all of them: {:?}",
+                        new_pooled_transactions.0.len(),
+                        peer,
+                        new_pooled_transactions.0
+                    );
                 }
 
                 // filter transactions that we've seen out of the request - we put this in its own
                 // block so the lock isn't held across an await
                 let filtered_txids: Vec<H256> = {
                     let seen_txids = self.new_transactions.read();
-                    new_pooled_transactions.0
+                    new_pooled_transactions
+                        .0
                         .iter()
                         .filter_map(|seen| (!seen_txids.contains_key(seen)).then(|| *seen))
                         .collect()
                 };
 
                 let next_request_id = self.current_request_id.fetch_add(1, Ordering::SeqCst);
-                debug!("Sending GetPooledTransactionsMessage with request id {} to peer {}", next_request_id, peer);
-                return self.send_to_peer(peer, Message::GetPooledTransactions(GetPooledTransactionsMessage {
-                    request_id: next_request_id as u64,
-                    tx_hashes: filtered_txids,
-                })).await
+                debug!(
+                    "Sending GetPooledTransactionsMessage with request id {} to peer {}",
+                    next_request_id, peer
+                );
+                return self
+                    .send_to_peer(
+                        peer,
+                        Message::GetPooledTransactions(GetPooledTransactionsMessage {
+                            request_id: next_request_id as u64,
+                            tx_hashes: filtered_txids,
+                        }),
+                    )
+                    .await;
             }
 
             Message::PooledTransactions(pooled_transactions) => {
-
                 let num_txs = pooled_transactions.transactions.len();
                 info!("got {:?} pooled transactions from {}", num_txs, peer);
 
                 for transaction in pooled_transactions.transactions {
                     let (typed_tx, sig) = transaction_from_message(transaction.clone()).unwrap();
-                    info!("🦀 NEW TRANSACTION with hash {:?}: {:?}", typed_tx.hash(&sig), typed_tx);
+                    info!(
+                        "🦀 NEW TRANSACTION with hash {:?}: {:?}",
+                        typed_tx.hash(&sig),
+                        typed_tx
+                    );
                 }
             }
             Message::NewBlock(new_block) => {
                 debug!("new block: {:?} from {}", new_block, peer);
             }
             Message::BlockHeaders(block_headers) => {
-                debug!("{:?} new block headers from {}", block_headers.headers.len(), peer);
+                debug!(
+                    "{:?} new block headers from {}",
+                    block_headers.headers.len(),
+                    peer
+                );
             }
             Message::NewBlockHashes(new_block_hashes) => {
                 debug!("new block hashes from {}: {:?}", peer, new_block_hashes);
@@ -320,7 +374,10 @@ impl P2PRelay {
                 debug!("get receipts from {}: {:?}", peer, get_receipts);
             }
             Message::GetPooledTransactions(get_pooled_transactions) => {
-                debug!("get pooled transactions from {}: {:?}", peer, get_pooled_transactions);
+                debug!(
+                    "get pooled transactions from {}: {:?}",
+                    peer, get_pooled_transactions
+                );
             }
             Message::GetBlockBodies(get_block_bodies) => {
                 debug!("get block bodes from {}: {:?}", peer, get_block_bodies);
@@ -339,7 +396,9 @@ impl P2PRelay {
 // Just converts the akula MessageWithSignature (with an included hash) to a TypedTransaction.
 // MessageWithSignature contains enough information to recover the sender, so we need to do that
 // and populate the TypedTransaction
-fn transaction_from_message(transaction: MessageWithSignature) -> Result<(TypedTransaction, Signature), rlp::DecoderError> {
+fn transaction_from_message(
+    transaction: MessageWithSignature,
+) -> Result<(TypedTransaction, Signature), rlp::DecoderError> {
     // TODO: remove unwrap
     let from = transaction.recover_sender().unwrap();
     let to = match transaction.message.action() {
@@ -353,17 +412,48 @@ fn transaction_from_message(transaction: MessageWithSignature) -> Result<(TypedT
         s: U256::from(&transaction.s().0),
         v: transaction.v() as u64,
     };
-    info!("prev signature: {:?}, new signature: {:?}", transaction.signature, sig);
+    info!(
+        "prev signature: {:?}, new signature: {:?}",
+        transaction.signature, sig
+    );
 
-    let ethers_chain_id = transaction.message
+    let ethers_chain_id = transaction
+        .message
         .chain_id()
         .map(|akula_chain_id| U64::from(akula_chain_id.0));
 
     // convert from akula's tx type to ethers - it seems like there is a bit of duplicated work
     // here. geth would probably accept gigantic nonces, but akula would not (due to the u64)
     let tx_result = match transaction.message {
-        akula::models::Message::Legacy { chain_id: _, nonce, gas_price, gas_limit, action: _, value, input } => {
-            TypedTransaction::Legacy(TransactionRequest {
+        akula::models::Message::Legacy {
+            chain_id: _,
+            nonce,
+            gas_price,
+            gas_limit,
+            action: _,
+            value,
+            input,
+        } => TypedTransaction::Legacy(TransactionRequest {
+            from: Some(from),
+            to,
+            gas_price: Some(U256::from_big_endian(&gas_price.to_be_bytes())),
+            gas: Some(U256::from(gas_limit)),
+            value: Some(U256::from_big_endian(&value.to_be_bytes())),
+            nonce: Some(U256::from(nonce)),
+            chain_id: ethers_chain_id,
+            data: Some(input.into()),
+        }),
+        akula::models::Message::EIP2930 {
+            chain_id: _,
+            nonce,
+            gas_price,
+            gas_limit,
+            action: _,
+            value,
+            input,
+            access_list,
+        } => TypedTransaction::Eip2930(Eip2930TransactionRequest {
+            tx: TransactionRequest {
                 from: Some(from),
                 to,
                 gas_price: Some(U256::from_big_endian(&gas_price.to_be_bytes())),
@@ -372,45 +462,47 @@ fn transaction_from_message(transaction: MessageWithSignature) -> Result<(TypedT
                 nonce: Some(U256::from(nonce)),
                 chain_id: ethers_chain_id,
                 data: Some(input.into()),
-            })
-        }
-        akula::models::Message::EIP2930 { chain_id: _, nonce, gas_price, gas_limit, action: _, value, input, access_list } => {
-            TypedTransaction::Eip2930(Eip2930TransactionRequest {
-                tx: TransactionRequest {
-                    from: Some(from),
-                    to,
-                    gas_price: Some(U256::from_big_endian(&gas_price.to_be_bytes())),
-                    gas: Some(U256::from(gas_limit)),
-                    value: Some(U256::from_big_endian(&value.to_be_bytes())),
-                    nonce: Some(U256::from(nonce)),
-                    chain_id: ethers_chain_id,
-                    data: Some(input.into()),
-                },
-                access_list: access_list
-                    .iter()
-                    .map(|item| AccessListItem { address: item.address, storage_keys: item.slots.clone() })
-                    .collect::<Vec<AccessListItem>>()
-                    .into()
-            })
-        }
-        akula::models::Message::EIP1559 { chain_id: _, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, action: _, value, input, access_list } => {
-            TypedTransaction::Eip1559(Eip1559TransactionRequest {
-                from: Some(from),
-                to,
-                gas: Some(U256::from(gas_limit)),
-                value: Some(U256::from_big_endian(&value.to_be_bytes())),
-                nonce: Some(U256::from(nonce)),
-                chain_id: ethers_chain_id,
-                data: Some(input.into()),
-                access_list: access_list
-                    .iter()
-                    .map(|item| AccessListItem { address: item.address, storage_keys: item.slots.clone() })
-                    .collect::<Vec<AccessListItem>>()
-                    .into(),
-                max_fee_per_gas: Some(U256::from_big_endian(&max_fee_per_gas.to_be_bytes())),
-                max_priority_fee_per_gas: Some(U256::from_big_endian(&max_priority_fee_per_gas.to_be_bytes())),
-            })
-        }
+            },
+            access_list: access_list
+                .iter()
+                .map(|item| AccessListItem {
+                    address: item.address,
+                    storage_keys: item.slots.clone(),
+                })
+                .collect::<Vec<AccessListItem>>()
+                .into(),
+        }),
+        akula::models::Message::EIP1559 {
+            chain_id: _,
+            nonce,
+            max_priority_fee_per_gas,
+            max_fee_per_gas,
+            gas_limit,
+            action: _,
+            value,
+            input,
+            access_list,
+        } => TypedTransaction::Eip1559(Eip1559TransactionRequest {
+            from: Some(from),
+            to,
+            gas: Some(U256::from(gas_limit)),
+            value: Some(U256::from_big_endian(&value.to_be_bytes())),
+            nonce: Some(U256::from(nonce)),
+            chain_id: ethers_chain_id,
+            data: Some(input.into()),
+            access_list: access_list
+                .iter()
+                .map(|item| AccessListItem {
+                    address: item.address,
+                    storage_keys: item.slots.clone(),
+                })
+                .collect::<Vec<AccessListItem>>()
+                .into(),
+            max_fee_per_gas: Some(U256::from_big_endian(&max_fee_per_gas.to_be_bytes())),
+            max_priority_fee_per_gas: Some(U256::from_big_endian(
+                &max_priority_fee_per_gas.to_be_bytes(),
+            )),
+        }),
     };
 
     Ok((tx_result, sig))
@@ -419,8 +511,7 @@ fn transaction_from_message(transaction: MessageWithSignature) -> Result<(TypedT
 #[async_trait]
 impl CapabilityServer for P2PRelay {
     fn on_peer_connect(&self, peer: PeerId, caps: HashMap<CapabilityName, CapabilityVersion>) {
-        let first_events = if let Some(status_message) = &*self.status_message.read()
-        {
+        let first_events = if let Some(status_message) = &*self.status_message.read() {
             let mut status_data = BytesMut::new();
             status_message.encode(&mut status_data);
             vec![OutboundEvent::Message {
@@ -460,7 +551,10 @@ impl CapabilityServer for P2PRelay {
                 if let Some(DisconnectReason::UselessPeer) = reason {
                     info!("Peer {} disconnected because we are a useless peer", peer);
                 }
-                debug!("Peer {} disconnect (reason: {:?}), tearing down peer.", peer, reason);
+                debug!(
+                    "Peer {} disconnect (reason: {:?}), tearing down peer.",
+                    peer, reason
+                );
                 self.teardown_peer(peer);
             }
             InboundEvent::Message {
@@ -472,17 +566,15 @@ impl CapabilityServer for P2PRelay {
                     Err(error) => {
                         debug!("Invalid Eth message ID: {}! Kicking peer.", error);
                         self.disconnect_peer(peer).await;
-                        return
+                        return;
                     }
                 };
                 let eth_message = match decode_rlp_message(eth_message_id, &data) {
-                    Ok(message_id) => {
-                        message_id
-                    },
+                    Ok(message_id) => message_id,
                     Err(error) => {
                         debug!("Error decoding devp2p message: {}! Kicking peer.", error);
                         self.disconnect_peer(peer).await;
-                        return
+                        return;
                     }
                 };
                 if let Err(reason) = self.handle_eth_message(peer, eth_message).await {
