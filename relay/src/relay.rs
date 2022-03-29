@@ -1,37 +1,33 @@
 use async_stream::stream;
 use async_trait::async_trait;
 use thiserror::Error;
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use ethereum_types::{H256, U256, U64};
 use akula::{
-    sentry_connector::{messages::{Message, EthMessageId, StatusMessage, GetBlockBodiesMessage, GetPooledTransactionsMessage, NewPooledTransactionHashesMessage}, message_decoder::*},
+    sentry_connector::{messages::{Message, EthMessageId, StatusMessage, GetPooledTransactionsMessage}, message_decoder::*},
     sentry::{
         devp2p::{CapabilityName, CapabilityVersion, InboundEvent, OutboundEvent, PeerId, CapabilityServer, DisconnectReason, Message as DevP2PMessage},
         eth::{EthProtocolVersion, capability_name},
-    }, models::{MessageWithSignature, TxType},
+    }, models::MessageWithSignature,
 };
-use secp256k1::rand::random;
-use ethers::core::{types::{Signature, H512, Chain, ParseChainError, transaction::{eip2718::TypedTransaction, eip2930::AccessListItem}, Transaction, TransactionRequest, Eip2930TransactionRequest, Eip1559TransactionRequest, NameOrAddress}};
+use ethers::core::types::{Signature, H512, Chain, ParseChainError, transaction::{eip2718::TypedTransaction, eip2930::AccessListItem}, TransactionRequest, Eip2930TransactionRequest, Eip1559TransactionRequest, NameOrAddress};
 use futures_core::stream::BoxStream;
 use parking_lot::RwLock;
 use std::{
-    str::FromStr,
     time::Duration,
     collections::{HashMap, HashSet},
-    num::NonZeroUsize,
     sync::{
         atomic::{AtomicBool, Ordering, AtomicU32},
         Arc,
     }, usize, convert::TryFrom,
 };
 use tokio::sync::{
-    // broadcast::{channel as broadcast_channel, Sender as BroadcastSender},
     mpsc::{channel, Sender, error::SendTimeoutError},
     Mutex as AsyncMutex,
 };
 use fastrlp::Encodable as FastEncodable;
 use tokio_stream::StreamExt;
-use tracing::{debug, warn, info};
+use tracing::{debug, info};
 
 /// The channel for sending messages to a peer
 type OutboundSender = Sender<OutboundEvent>;
@@ -47,11 +43,6 @@ struct Pipes {
     receiver: OutboundReceiver,
 }
 
-// TODO: figure out why this exists and determine if it is needed, or if we might want to change
-// this in the future.
-pub const BUFFERING_FACTOR: usize = 5;
-
-// TODO: separate almost everything out by chain
 /// P2PRelay contains information that is necessary for connecting to the ethereum gossip protocol.
 /// In order to make a connection, we need at least a status message and protocol version to send
 /// to new peers.
@@ -75,16 +66,8 @@ pub struct P2PRelay {
     /// The set of peers we're connected to.
     valid_peers: Arc<RwLock<HashSet<H512>>>,
 
-    /// This maps a peer to a list of transaction hashes that the peer has requested.
-    /// The transaction body should be retrieved from this list of hashes, ideally from the peer
-    /// that requested it.
-    hashes_from_peer: Arc<RwLock<HashMap<PeerId, H256>>>,
-
     /// Transactions that we've received
     new_transactions: Arc<RwLock<HashMap<H256, TypedTransaction>>>,
-
-    /// Requests that we've sent
-    sent_requests: Arc<RwLock<HashMap<usize, Message>>>,
 
     /// Current request id
     current_request_id: Arc<AtomicU32>,
@@ -108,27 +91,13 @@ pub struct P2PRelay {
     // =====
     // The below comment might be obsolete
     // =====
-    // This broadcast channel will be consumed to send prepared RLP messages to peers.
-    // Maybe turn this into some sort of struct where we separate each message into message type,
-    // and construct BroadcastSenders for each message type.
-    // Not sure what splitting up message by type really gets us, but it's possible we only need a
-    // certain type of node to respond to certain types of messages.
-    // data_sender: BroadcastSender<InboundMessage>,
-
-    // this was used to report peer connect / disconnect status to a node, but the node doesn't
-    // really need to know that, since we appear as a sole node to even trusted peers.
-    // peers_status_sender: BroadcastSender<PeersReply>,
-
-    // TODO: Cache certain types of responses so we can quickly reply to some messages that we've
-    // already seen - may have a bad effect on the network, as a peer might send something invalid
-    // that gets us kicked off, or worse allows our node to act as a repeater of bad data
 
     /// Whether or not we should connect to any new peers.
     no_new_peers: Arc<AtomicBool>,
 }
 
 #[derive(Error, Debug)]
-/// TODO: this doc
+/// Errors that occur when handling or responding to ETH p2p messages
 pub enum P2PRelayError {
     /// Thrown if we can't identify a chain in a status message
     #[error("Failed to parse chain: {0}")]
@@ -165,9 +134,7 @@ impl P2PRelay {
             valid_peers: Default::default(),
             no_new_peers: Arc::new(AtomicBool::new(true)),
             total_work_map: Default::default(),
-            hashes_from_peer: Default::default(),
             new_transactions: Default::default(),
-            sent_requests: Default::default(),
             current_request_id: Arc::new(AtomicU32::new(0)),
         }
     }
@@ -185,10 +152,6 @@ impl P2PRelay {
         let mut pipes = self.peer_pipes.write();
 
         pipes.entry(peer).or_insert(p);
-    }
-
-    fn get_pipes(&self, peer: PeerId) -> Option<Pipes> {
-        self.peer_pipes.read().get(&peer).cloned()
     }
 
     /// Get the message sender channel for the given peer
@@ -269,6 +232,8 @@ impl P2PRelay {
             Message::Status(status) => {
                 // currently all this does is track the highest difficulty (as claimed by the
                 // peer) status message for each chain.
+                // We could use this status message for future connections if we are sure it's
+                // correct
                 debug!("Decoded status message from {}: {:?}", peer, status);
                 let status_difficulty = U256::from_big_endian(&status.total_difficulty.to_be_bytes());
 
@@ -298,35 +263,23 @@ impl P2PRelay {
                 let num_txs_to_show = 8;
                 if new_pooled_transactions.0.len() >= num_txs_to_show {
                     let slice = new_pooled_transactions.0.split_at(num_txs_to_show).0;
-                    debug!("{:?} NEW POOLED TX HASHES FROM {}! Here are {:?} of them: {:?}", new_pooled_transactions.0.len(), peer, num_txs_to_show, slice);
+                    debug!("{:?} NEW POOLED TX HASHES FROM {}! Here are {:?} of them: {:?}",
+                        new_pooled_transactions.0.len(), peer, num_txs_to_show, slice);
                 } else {
-                    debug!("{:?} NEW POOLED TX HASHES FROM {}! Here are all of them: {:?}", new_pooled_transactions.0.len(), peer, new_pooled_transactions.0);
+                    debug!("{:?} NEW POOLED TX HASHES FROM {}! Here are all of them: {:?}",
+                        new_pooled_transactions.0.len(), peer, new_pooled_transactions.0);
                 }
 
                 // filter transactions that we've seen out of the request - we put this in its own
                 // block so the lock isn't held across an await
                 let filtered_txids: Vec<H256> = {
                     let seen_txids = self.new_transactions.read();
-                    new_pooled_transactions.0.iter().filter_map(|seen| (!seen_txids.contains_key(seen)).then(|| *seen)).collect()
+                    new_pooled_transactions.0
+                        .iter()
+                        .filter_map(|seen| (!seen_txids.contains_key(seen)).then(|| *seen))
+                        .collect()
                 };
 
-                // TODO: how to ensure that we get a transaction body for every corresponding tx
-                // hash eventually?
-                // Individual pipes manage this for a single peer, but we want to do this for
-                // multiple potential peers.
-                // Pipes will ensure that a peer receives a message, but what if we disconnect from
-                // a peer and never see them again?
-                // What if a peer times out?
-                // In that case, we should send the current set of unmatched hases (hashes without
-                // bodies) to the next most suitable peer, while the peer that sent the request is
-                // unavailable (potentially forever).
-                // We could have some data structure that will try to send to a specified peer (or
-                // can send to a set of peers, without a specific peer in mind) first, then use
-                // some other default criteria for selecting other peers in case the specified peer
-                // message send fails.
-                // Maybe there is a multi-connection version of sender, and a multi-connection
-                // version of receiver?
-                // If not, one could be designed and implemented.
                 let next_request_id = self.current_request_id.fetch_add(1, Ordering::SeqCst);
                 debug!("Sending GetPooledTransactionsMessage with request id {} to peer {}", next_request_id, peer);
                 return self.send_to_peer(peer, Message::GetPooledTransactions(GetPooledTransactionsMessage {
@@ -335,24 +288,6 @@ impl P2PRelay {
                 })).await
             }
 
-            // from eth/66 docs:
-            //
-            // This is the response to GetPooledTransactions, returning the requested transactions
-            // from the local pool. The items in the list are transactions in the format described
-            // in the main Ethereum specification.
-            //
-            // The transactions must be in same order as in the request, but it is OK to skip transactions
-            // which are not available. This way, if the response size limit is reached, requesters will know
-            // which hashes to request again (everything starting from the last returned transaction) and which
-            // to assume unavailable (all gaps before the last returned transaction).
-            //
-            // It is permissible to first announce a transaction via NewPooledTransactionHashes,
-            // but then to refuse serving it via PooledTransactions. This situation can arise when
-            // the transaction is included in a block (and removed from the pool) in between the
-            // announcement and the request.
-            //
-            // A peer may respond with an empty list if none of the hashes match transactions in
-            // its pool.
             Message::PooledTransactions(pooled_transactions) => {
 
                 let num_txs = pooled_transactions.transactions.len();
@@ -360,8 +295,6 @@ impl P2PRelay {
 
                 for transaction in pooled_transactions.transactions {
                     let (typed_tx, sig) = transaction_from_message(transaction.clone()).unwrap();
-                    // TODO: set up stream, insert this into stream if it hasn't been streamed
-                    // already. Is there an efficient deduplicating stream?
                     info!("🦀 NEW TRANSACTION with hash {:?}: {:?}", typed_tx.hash(&sig), typed_tx);
                 }
             }
@@ -398,21 +331,6 @@ impl P2PRelay {
             Message::GetNodeData(get_node_data) => {
                 debug!("get node data from {}: {:?}", peer, get_node_data);
             }
-
-            // We may want to prevent peering with our own relay nodes. To accomplish
-            // this, we could use a protocol like GRPC, but we would still need to have some form
-            // of authorization, to make sure that only our clients can connect.
-            //
-            // This could be done by having a list of IPs which are already trusted, or we could
-            // have a list of authorized public keys (or hashed pubkeys), and include signatures in
-            // each command we send.
-            //
-            // If we authorize the peer that we are receiving additional (non-standard-eth)
-            // messages from, we can reuse the message id space for other types of commands to
-            // control the relay.
-            //
-            // We should throw a message parsing error if we get these types of messages from
-            // untrusted IPs, or if the signature fails to validate.
         };
         Ok(())
     }
@@ -423,18 +341,13 @@ impl P2PRelay {
 // and populate the TypedTransaction
 fn transaction_from_message(transaction: MessageWithSignature) -> Result<(TypedTransaction, Signature), rlp::DecoderError> {
     // TODO: remove unwrap
-    // we would need to modify the decode_signed to do sender recovery in order for this to work.
-    // Instead, let's just do it here. I'm not sure if we would need to decode a signed transaction
-    // elsewhere in eth applications, so it might not make sense for decode_signed to be p2p
-    // specific, whereas decode would be more general. then again, I'm not sure that decode_signed
-    // decodes any encoding other than our own signed encoding.
     let from = transaction.recover_sender().unwrap();
     let to = match transaction.message.action() {
         akula::models::TransactionAction::Create => None,
         akula::models::TransactionAction::Call(address) => Some(NameOrAddress::Address(address)),
     };
 
-    // interesting that the MessageWithSignature uses H256 types, R is a coordinate not a hash
+    // MessageWithSignature uses H256 types, R is a coordinate not a hash
     let sig = Signature {
         r: U256::from(&transaction.r().0),
         s: U256::from(&transaction.s().0),
@@ -447,8 +360,7 @@ fn transaction_from_message(transaction: MessageWithSignature) -> Result<(TypedT
         .map(|akula_chain_id| U64::from(akula_chain_id.0));
 
     // convert from akula's tx type to ethers - it seems like there is a bit of duplicated work
-    // here. Interesting that geth would probably accept gigantic nonces, but akula would not (due
-    // to the u64)
+    // here. geth would probably accept gigantic nonces, but akula would not (due to the u64)
     let tx_result = match transaction.message {
         akula::models::Message::Legacy { chain_id: _, nonce, gas_price, gas_limit, action: _, value, input } => {
             TypedTransaction::Legacy(TransactionRequest {
