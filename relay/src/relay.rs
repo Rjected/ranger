@@ -1,5 +1,5 @@
 use akula::{
-    models::MessageWithSignature,
+    models::{MessageWithSignature, ChainId},
     sentry::{
         devp2p::{
             CapabilityName, CapabilityServer, CapabilityVersion, DisconnectReason, InboundEvent,
@@ -9,7 +9,7 @@ use akula::{
     },
     sentry_connector::{
         message_decoder::*,
-        messages::{EthMessageId, GetPooledTransactionsMessage, Message, StatusMessage},
+        messages::{EthMessageId, GetPooledTransactionsMessage, Message, StatusMessage, GetBlockHeadersMessage, GetBlockHeadersMessageParams},
     },
 };
 use async_stream::stream;
@@ -380,12 +380,36 @@ impl P2PRelay {
             }
             Message::GetBlockHeaders(get_block_headers) => {
                 debug!("get block headers from {}: {:?}", peer, get_block_headers);
+                // send this to any peer!
+                let next_request_id = self.current_request_id.fetch_add(1, Ordering::SeqCst);
+                debug!(
+                    "Relaying GetBlockHeadersMessage with request id {} to peer {}",
+                    next_request_id, peer
+                );
+                return self
+                    .send_to_peer(
+                        peer,
+                        Message::GetBlockHeaders(GetBlockHeadersMessage {
+                            request_id: next_request_id as u64,
+                            params: get_block_headers.params,
+                        }),
+                    )
+                    .await;
             }
             Message::GetNodeData(get_node_data) => {
                 debug!("get node data from {}: {:?}", peer, get_node_data);
             }
         };
         Ok(())
+    }
+}
+
+// Creates an accurate v based on a chain id and y parity. used for akula -> ethers type conversion
+fn v_from_chain_id_parity(odd_y_parity: bool, chain_id: Option<ChainId>) -> u64 {
+    if let Some(chain_id_real) = chain_id {
+        chain_id_real.0 * 2 + 35 + odd_y_parity as u64
+    } else {
+        27 + odd_y_parity as u64
     }
 }
 
@@ -406,7 +430,7 @@ fn transaction_from_message(
     let sig = Signature {
         r: U256::from(&transaction.r().0),
         s: U256::from(&transaction.s().0),
-        v: transaction.v() as u64,
+        v: v_from_chain_id_parity(transaction.signature.odd_y_parity(), transaction.message.chain_id()),
     };
     info!(
         "prev signature: {:?}, new signature: {:?}",
