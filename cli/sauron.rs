@@ -12,15 +12,15 @@ use anyhow::Context;
 use cidr::IpCidr;
 use clap::Parser;
 use ethereum_forkid::{ForkHash, ForkId};
-use ethereum_types::{H256, U256};
+use ethereum_types::H256;
 use maplit::btreemap;
-use ranger::relay::P2PRelay;
+use ranger::relay::{P2PRelay, MempoolListener};
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use std::collections::HashMap;
 use std::{num::NonZeroUsize, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 use task_group::TaskGroup;
 use tokio::time::sleep;
-use tokio_stream::StreamMap;
+use tokio_stream::{StreamMap, StreamExt};
 use tracing::{info, trace, warn};
 use tracing_subscriber::{
     prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter,
@@ -129,6 +129,23 @@ impl OptsDiscV4 {
 }
 
 #[tokio::main]
+/// TODO: a goal for this should be to simplify initialization s.t. it's something like this:
+/// ```
+/// // starts capability server, swarm, etc. responds to messages under the hood
+/// let relay = Relay::new()
+///               .status(status_message);
+/// // or, with a version that peeks at status messages and will send the highest difficulty status
+/// // we've seen so far. A peer could send us bogus status messages with high difficulty!
+/// let relay = Relay::peeking_status();
+/// // or, with a version that asks for headers, but doesn't verify blocks. just links together
+/// // header hashes that a peer sends us so we can reconstruct a correct status message on our
+/// // own, like SPV
+/// let relay = Relay::spv_status();
+/// // or with a trusted peer that we reach out to for things like the status and other p2p
+/// // messages. would need to have the ip&port/enode/enr for that peer
+/// let peer = get_trusted_peer();
+/// let relay = Relay::with_trusted_peer(peer);
+/// ```
 async fn main() -> anyhow::Result<()> {
     let opts: Opts = Opts::parse();
     fdlimit::raise_fd_limit();
@@ -137,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_default()
         .is_empty()
     {
-        EnvFilter::new("sauron=trace,ranger=trace,akula=info,relay=trace")
+        EnvFilter::new("sauron=trace,akula=info,relay=info")
     } else {
         EnvFilter::from_default_env()
     };
@@ -308,6 +325,10 @@ async fn main() -> anyhow::Result<()> {
 
     info!("RLPx node listening at {}", listen_addr);
 
+    // let's just keep waiting for transactions
+    let mut tx_stream = swarm.subscribe_pending_txs().unwrap();
+    let mut hashes_stream = swarm.subscribe_pending_hashes().unwrap();
+
     let mut counter: u32 = 0;
     loop {
         counter += 1;
@@ -319,6 +340,14 @@ async fn main() -> anyhow::Result<()> {
                 opts.max_peers
             );
             counter = 0;
+        }
+
+        if let Some(hash) = hashes_stream.next().await {
+            info!("New tx hash! {:?}", hash.unwrap())
+        }
+
+        if let Some(new_tx) = tx_stream.next().await {
+            info!("New tx! {:?}", new_tx.unwrap())
         }
 
         sleep(Duration::from_millis(20)).await;

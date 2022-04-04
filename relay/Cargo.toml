@@ -15,7 +15,7 @@ ethers-rs types
 """
 
 [dependencies]
-ethers = { git = "https://github.com/Rjected/ethers-rs", features = ["abigen", "legacy", "ws"], branch = "signed_transaction_decoding" }
+ethers = { git = "https://github.com/Rjected/ethers-rs", features = ["abigen", "legacy", "ws"], branch = "add_eq_tx" }
 serde = { version = "1.0.126", features = ["derive"] }
 
 # TODO: condense extra features needed and determine if necessary, or if they

@@ -9,7 +9,7 @@ use akula::{
     },
     sentry_connector::{
         message_decoder::*,
-        messages::{EthMessageId, GetPooledTransactionsMessage, Message, StatusMessage, GetBlockHeadersMessage, GetBlockHeadersMessageParams},
+        messages::{EthMessageId, GetPooledTransactionsMessage, Message, StatusMessage, GetBlockHeadersMessage},
     },
 };
 use async_stream::stream;
@@ -19,7 +19,7 @@ use ethereum_types::{H256, U256, U64};
 use ethers::core::types::{
     transaction::{eip2718::TypedTransaction, eip2930::AccessListItem},
     Chain, Eip1559TransactionRequest, Eip2930TransactionRequest, NameOrAddress, ParseChainError,
-    Signature, TransactionRequest, H512,
+    Signature, TransactionRequest, H512, TxHash
 };
 use fastrlp::Encodable as FastEncodable;
 use futures_core::stream::BoxStream;
@@ -39,8 +39,10 @@ use tokio::sync::{
     mpsc::{channel, error::SendTimeoutError, Sender},
     Mutex as AsyncMutex,
 };
-use tokio_stream::StreamExt;
+use tokio_stream::{StreamExt, wrappers::{BroadcastStream, errors::BroadcastStreamRecvError}};
 use tracing::{debug, info};
+
+use crate::p2p_api::{SignedTx, MempoolListener, DedupStream};
 
 /// The channel for sending messages to a peer
 type OutboundSender = Sender<OutboundEvent>;
@@ -70,6 +72,9 @@ pub struct P2PRelay {
     /// message.
     protocol_version: EthProtocolVersion,
 
+    /// Current request id
+    current_request_id: Arc<AtomicU32>,
+
     /// The highest difficulty status messages we can identify for a given chain
     status_map: Arc<RwLock<HashMap<Chain, StatusMessage>>>,
 
@@ -82,8 +87,11 @@ pub struct P2PRelay {
     /// Transactions that we've received
     new_transactions: Arc<RwLock<HashMap<H256, TypedTransaction>>>,
 
-    /// Current request id
-    current_request_id: Arc<AtomicU32>,
+    /// Transactions that will be streamed
+    hashes_stream: Arc<RwLock<DedupStream<TxHash>>>,
+
+    /// Transactions that will be streamed
+    transaction_stream: Arc<RwLock<DedupStream<SignedTx>>>,
 
     // TODO: lots of things in this struct are to be replaced with a multi peer sender / message
     // manager. We will un-queue requests that correspond to responses that we receive
@@ -141,6 +149,8 @@ impl P2PRelay {
             status_map: Default::default(),
             valid_peers: Default::default(),
             no_new_peers: Arc::new(AtomicBool::new(true)),
+            transaction_stream: Default::default(),
+            hashes_stream: Default::default(),
             total_work_map: Default::default(),
             new_transactions: Default::default(),
             current_request_id: Arc::new(AtomicU32::new(0)),
@@ -315,6 +325,15 @@ impl P2PRelay {
                         .collect()
                 };
 
+                // let's release the lock quickly
+                {
+                    let mut hashes_stream = self.hashes_stream.write();
+                    for item in filtered_txids.clone() {
+                        // TODO: remove unwrap
+                        hashes_stream.insert(&item).unwrap();
+                    }
+                }
+
                 let next_request_id = self.current_request_id.fetch_add(1, Ordering::SeqCst);
                 debug!(
                     "Sending GetPooledTransactionsMessage with request id {} to peer {}",
@@ -327,8 +346,7 @@ impl P2PRelay {
                             request_id: next_request_id as u64,
                             tx_hashes: filtered_txids,
                         }),
-                    )
-                    .await;
+                    ).await;
             }
 
             Message::PooledTransactions(pooled_transactions) => {
@@ -337,11 +355,12 @@ impl P2PRelay {
 
                 for transaction in pooled_transactions.transactions {
                     let (typed_tx, sig) = transaction_from_message(transaction.clone()).unwrap();
-                    info!(
-                        "🦀 NEW TRANSACTION with hash {:?}: {:?}",
-                        typed_tx.hash(&sig),
-                        typed_tx
-                    );
+                    let mut tx_stream = self.transaction_stream.write();
+                    // TODO: remove unwrap
+                    tx_stream.insert(&SignedTx {
+                        tx: typed_tx,
+                        sig,
+                    }).unwrap();
                 }
             }
             Message::NewBlock(new_block) => {
@@ -404,6 +423,26 @@ impl P2PRelay {
     }
 }
 
+/// Allow for subscribing to new transactions and transaction hashes
+#[async_trait]
+impl MempoolListener for P2PRelay {
+    type TxStream = BroadcastStream<SignedTx>;
+    type TxHashStream = BroadcastStream<TxHash>;
+
+    type Error = P2PRelayError;
+    type BroadcastError = BroadcastStreamRecvError;
+
+    fn subscribe_pending_txs(&self) -> Result<Self::TxStream, Self::Error> {
+        let txs = self.transaction_stream.read();
+        Ok(BroadcastStream::new(txs.sender.subscribe()))
+    }
+
+    fn subscribe_pending_hashes(&self) -> Result<Self::TxHashStream, Self::Error> {
+        let hashes = self.hashes_stream.read();
+        Ok(BroadcastStream::new(hashes.sender.subscribe()))
+    }
+}
+
 // Creates an accurate v based on a chain id and y parity. used for akula -> ethers type conversion
 fn v_from_chain_id_parity(odd_y_parity: bool, chain_id: Option<ChainId>) -> u64 {
     if let Some(chain_id_real) = chain_id {
@@ -432,10 +471,6 @@ fn transaction_from_message(
         s: U256::from(&transaction.s().0),
         v: v_from_chain_id_parity(transaction.signature.odd_y_parity(), transaction.message.chain_id()),
     };
-    info!(
-        "prev signature: {:?}, new signature: {:?}",
-        transaction.signature, sig
-    );
 
     let ethers_chain_id = transaction
         .message
@@ -530,7 +565,7 @@ fn transaction_from_message(
 
 #[async_trait]
 impl CapabilityServer for P2PRelay {
-    fn on_peer_connect(&self, peer: PeerId, caps: HashMap<CapabilityName, CapabilityVersion>) {
+    fn on_peer_connect(&self, peer: PeerId, _caps: HashMap<CapabilityName, CapabilityVersion>) {
         let first_events = if let Some(status_message) = &*self.status_message.read() {
             let mut status_data = BytesMut::new();
             status_message.encode(&mut status_data);
