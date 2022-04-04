@@ -1,5 +1,5 @@
 mod relay;
-pub use relay::P2PRelay;
+pub use crate::relay::P2PRelay;
 
 mod p2p_api;
-pub use p2p_api::MempoolListener;
+pub use crate::p2p_api::MempoolListener;

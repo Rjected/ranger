@@ -3,6 +3,8 @@ use futures_core::Stream;
 use ethers::core::types::{TxHash, transaction::eip2718::TypedTransaction, Signature};
 use tokio::sync::broadcast::{Sender, self, error::SendError};
 use std::{error::Error, fmt::Debug, collections::{HashSet, hash_map::DefaultHasher}, hash::{Hash, Hasher}};
+use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+use tracing::debug;
 
 /// A trait for sending eth p2p messages to a peer
 pub trait P2PSender {
@@ -63,26 +65,36 @@ pub struct DedupStream<M> {
 }
 
 impl<M> DedupStream<M> where
-    M: Clone + Eq + Hash {
+    M: Clone + Eq + Hash + Debug {
+    /// Creates a new DedupStream with a capacity of 16384.
     pub fn new() -> Self {
+        Self::new_with_capacity(16384)
+    }
+
+    /// Creates a new DedupStream with the given capacity.
+    pub fn new_with_capacity(capacity: usize) -> Self {
         // basic capacity of 16384
-        let sender = broadcast::channel(16384).0;
+        let sender = broadcast::channel(capacity).0;
         let set = HashSet::new();
         DedupStream { sender, set }
     }
 
     /// Insert into the stream, checking if the item exists.
-    pub fn insert(&mut self, item: &M) -> Result<(), SendError<M>> {
-        if !self.set.contains(item) {
-            self.sender.send(item.clone()).map(|_| {Ok(())})?
+    ///
+    /// If the stream has not already broadcasted this value, true is returned.
+    ///
+    /// If the stream already broadcasted this value, false is returned.
+    pub fn insert(&mut self, item: &M) -> Result<bool, SendError<M>> {
+        if self.set.insert(item.clone()) {
+            self.sender.send(item.clone()).map(|_| {Ok(true)})?
         } else {
-            Ok(())
+            Ok(false)
         }
     }
 }
 
 impl<M> Default for DedupStream<M> where
-    M: Clone + Eq + Hash {
+    M: Clone + Eq + Hash + Debug {
     fn default() -> Self {
         DedupStream::new()
     }
@@ -91,15 +103,22 @@ impl<M> Default for DedupStream<M> where
 #[tokio::test]
 async fn test_proper_dedup() {
     let same_elem = 1;
-    let mut new_dedup = DedupStream::<usize>::new();
-    let mut receiver = new_dedup.sender.subscribe();
+    let next_elem = 2;
+    let mut new_dedup = DedupStream::<usize>::new_with_capacity(4);
+    let mut receiver = BroadcastStream::new(new_dedup.sender.subscribe());
 
-    new_dedup.insert(&same_elem).unwrap();
-    new_dedup.insert(&same_elem).unwrap();
-    let result = receiver.recv().await.unwrap();
+    let first = new_dedup.insert(&same_elem).unwrap();
+    assert!(first);
+    let second = new_dedup.insert(&next_elem).unwrap();
+    assert!(second);
+    let third = new_dedup.insert(&next_elem).unwrap();
+    assert!(!third);
+    let fourth = new_dedup.insert(&same_elem).unwrap();
+    assert!(!fourth);
+    let result = receiver.next().await.unwrap().unwrap();
     assert_eq!(same_elem, result);
 
     // hopefully we have an error here rather than result
-    let expect_err = receiver.recv().await;
-    assert!(expect_err.is_err());
+    let next_result = receiver.next().await.unwrap().unwrap();
+    assert_eq!(next_elem, next_result);
 }
