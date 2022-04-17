@@ -237,8 +237,6 @@ async fn main() -> anyhow::Result<()> {
 
     let protocol_version = EthProtocolVersion::Eth66;
 
-    let capability_server = Arc::new(P2PRelay::new(protocol_version));
-
     // We need to set the status so we can start discovering new peers
     // Got these from peers, should come up with a way to bootstrap these messages once we're
     // connected
@@ -299,9 +297,35 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
+    // this status message uses a best_hash of the genesis so we don't get asked for headers by
+    // peers.
+    // This is a temporary measure until we can properly relay headers and blocks
+    let genesis_status = StatusMessage {
+        protocol_version: EthProtocolVersion::Eth66 as usize,
+        network_id: 1,
+        total_difficulty: akula::models::U256::from_str_radix("0", 10)
+            .unwrap(),
+        best_hash: H256::from_str(
+            "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3",
+        )
+        .unwrap(),
+        genesis_hash: H256::from_str(
+            "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3",
+        )
+        .unwrap(),
+        // even though the ForkHash contains hashes that a peer with this status wouldn't know (our
+        // best_hash is genesis!), we can still use the most recent forkHash
+        fork_id: ForkId {
+            hash: ForkHash([0xb7, 0x15, 0x07, 0x7d]),
+            next: 0,
+        },
+    };
+
     // tell the relay to use this status message
-    capability_server.set_status(two_status_message);
-    let no_new_peers = capability_server.no_new_peers_handle();
+    let relay = P2PRelay::new(protocol_version)
+        .with_status(genesis_status);
+    let relay = Arc::new(relay);
+    let no_new_peers = relay.no_new_peers_handle();
 
     let swarm = Swarm::builder()
         .with_task_group(tasks.clone())
@@ -317,7 +341,7 @@ async fn main() -> anyhow::Result<()> {
             btreemap! {
                 CapabilityId { name: capability_name(), version: protocol_version as CapabilityVersion } => 17,
             },
-            capability_server.clone(),
+            relay.clone(),
             secret_key,
         )
         .await
@@ -342,13 +366,13 @@ async fn main() -> anyhow::Result<()> {
             counter = 0;
         }
 
-        if let Some(hash) = hashes_stream.next().await {
-            info!("New tx hash! {:?}", hash.unwrap())
-        }
+        // if let Some(hash) = hashes_stream.next().await {
+        //     info!("New tx hash! {:?}", hash.unwrap())
+        // }
 
-        if let Some(new_tx) = tx_stream.next().await {
-            info!("New tx! {:?}", new_tx.unwrap())
-        }
+        // if let Some(new_tx) = tx_stream.next().await {
+        //     info!("New tx! {:?}", new_tx.unwrap())
+        // }
 
         sleep(Duration::from_millis(20)).await;
     }

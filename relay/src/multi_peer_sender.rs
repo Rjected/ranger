@@ -1,5 +1,3 @@
-
-
 /// This keeps track of multiple peers, and will queue messages to send to those peers.
 /// This will send each queued message to the set of peers that are currently active until the
 /// messages are explicitly un-queued.

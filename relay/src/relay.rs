@@ -61,12 +61,10 @@ struct Pipes {
 /// P2PRelay contains information that is necessary for connecting to the ethereum gossip protocol.
 /// In order to make a connection, we need at least a status message and protocol version to send
 /// to new peers.
+#[derive(Clone)]
 pub struct P2PRelay {
     /// A map between a peer ID and the currently active connection with that peer.
     peer_pipes: Arc<RwLock<HashMap<PeerId, Pipes>>>,
-
-    /// The status message to relay to peers during an eth handshake.
-    status_message: Arc<RwLock<Option<StatusMessage>>>,
 
     /// The protocol version to send during the RLPx handshake, to be included in a `Hello`
     /// message.
@@ -75,8 +73,8 @@ pub struct P2PRelay {
     /// Current request id
     current_request_id: Arc<AtomicU32>,
 
-    /// The highest difficulty status messages we can identify for a given chain
-    status_map: Arc<RwLock<HashMap<Chain, StatusMessage>>>,
+    /// The status messages we hold for each chain
+    status_map: Arc<RwLock<HashMap<u64, StatusMessage>>>,
 
     /// Total work for each chain
     total_work_map: Arc<RwLock<HashMap<Chain, U256>>>,
@@ -119,6 +117,10 @@ pub enum P2PRelayError {
     #[error("Failed to parse chain: {0}")]
     InvalidChain(#[from] ParseChainError),
 
+    /// Thrown if the chain does not have a corresponding status message
+    #[error("Chain is not supported: {0}")]
+    UnsupportedChain(&'static str),
+
     /// Thrown if we time out when sending a message to a peer
     #[error("Timeout when sending message to a peer: {0}")]
     SendTimeout(#[from] SendTimeoutError<OutboundEvent>),
@@ -137,6 +139,10 @@ pub enum P2PRelayError {
     /// found
     #[error("Cannot find peer or peer has been removed")]
     CannotFindPeer,
+
+    /// Thrown if there are no connected peers we can relay to.
+    #[error("Cannot find peer that can relay messages")]
+    CannotFindRelayPeer,
 }
 
 impl P2PRelay {
@@ -144,7 +150,6 @@ impl P2PRelay {
         debug!("P2PRelay started with debug");
         Self {
             peer_pipes: Default::default(),
-            status_message: Default::default(),
             protocol_version,
             status_map: Default::default(),
             valid_peers: Default::default(),
@@ -157,13 +162,23 @@ impl P2PRelay {
         }
     }
 
-    pub fn no_new_peers_handle(&self) -> Arc<AtomicBool> {
-        self.no_new_peers.clone()
+    #[must_use]
+    /// Adds the given status for use when sending handshakes to nodes.
+    /// The input status will used during handshakes for the network contained in the status.
+    pub fn with_status(&self, status: StatusMessage) -> Self {
+        let this = self.clone();
+        {
+            let mut status_map = this.status_map.write();
+            status_map.insert(status.network_id, status);
+        }
+
+        // mark as ready to accept connections because we have at least one status message
+        this.no_new_peers.store(false, Ordering::SeqCst);
+        this
     }
 
-    /// View the current status messages sent by peers
-    pub fn view_status_map(&self) -> HashMap<Chain, StatusMessage> {
-        (*self.status_map.read()).clone()
+    pub fn no_new_peers_handle(&self) -> Arc<AtomicBool> {
+        self.no_new_peers.clone()
     }
 
     fn setup_peer(&self, peer: PeerId, p: Pipes) {
@@ -216,6 +231,43 @@ impl P2PRelay {
         Ok(())
     }
 
+    /// Relays a message to any peer we are currently connected to besides this peer!
+    /// TODO: want: a future on a message that is being sent to another peer (using a single peer
+    /// OR multi peer sender). awaiting it should return Result<ExpectedResponseType, Error>.
+    /// There are a bunch of messages in the eth protocol that you'd want responses from!
+    /// Then we could basically do something like this:
+    /// ```
+    /// async fn handle_message(&self, message: Message, peer: PeerId) {
+    ///     // ensures we receive an answer to our query
+    ///     let relay_response = self.send_eth_request(peer, message);
+    ///
+    /// }
+    /// ```
+    async fn relay_to_other_peer(&self, no_relay_to: PeerId, eth_message: Message) -> Result<(), P2PRelayError> {
+        let all_peers = self.peer_pipes.read();
+        let (_next_peer, sender_pipe) = all_peers.iter().find(|kv| kv.0 == &no_relay_to).ok_or(P2PRelayError::CannotFindRelayPeer)?;
+
+        let mut message_data = BytesMut::new();
+        eth_message.encode(&mut message_data);
+
+        let prepared_message = OutboundEvent::Message {
+            capability_name: capability_name(),
+            message: DevP2PMessage {
+                id: eth_message.eth_id() as usize,
+                data: message_data.freeze(),
+            },
+        };
+
+        // TODO: figure out what an appropriate timeout would be - should we even use timeouts?
+        sender_pipe
+            .sender
+            .send_timeout(prepared_message, Duration::from_millis(20))
+            .await
+            .map_err(P2PRelayError::SendTimeout)?;
+
+        Ok(())
+    }
+
     /// Remove the specified peer from the list of valid peers
     fn teardown_peer(&self, peer: PeerId) {
         let mut valid_peers = self.valid_peers.write();
@@ -229,11 +281,6 @@ impl P2PRelay {
 
     pub fn connected_peers(&self) -> usize {
         self.valid_peers.read().len()
-    }
-
-    pub fn set_status(&self, message: StatusMessage) {
-        *self.status_message.write() = Some(message);
-        self.no_new_peers.store(false, Ordering::SeqCst);
     }
 
     /// Disconnects a peer with a ProtocolBreach
@@ -260,33 +307,14 @@ impl P2PRelay {
     ) -> Result<(), P2PRelayError> {
         // This method just matches on a message type and processes it
         match message {
-            Message::Status(status) => {
-                // currently all this does is track the highest difficulty (as claimed by the
-                // peer) status message for each chain.
-                // We could use this status message for future connections if we are sure it's
-                // correct
-                debug!("Decoded status message from {}: {:?}", peer, status);
-                let status_difficulty =
-                    U256::from_big_endian(&status.total_difficulty.to_be_bytes());
-
-                // If the status message has a higher total difficulty then we save it with other
-                // status messages
-                let chain = Chain::try_from(status.network_id)?;
-                let mut total_work = self.total_work_map.write();
-                match total_work.get(&chain) {
-                    Some(total_difficulty) => {
-                        if status_difficulty > *total_difficulty {
-                            let mut status_map = self.status_map.write();
-                            total_work.insert(chain, status_difficulty);
-                            status_map.insert(chain, status);
-                        }
-                    }
-                    None => {
-                        let mut status_map = self.status_map.write();
-                        total_work.insert(chain, status_difficulty);
-                        status_map.insert(chain, status);
-                    }
-                }
+            Message::Status(their_status) => {
+                debug!("Decoded status message from {}: {:?}", peer, their_status);
+                let our_status = {
+                    let status_map = self.status_map.read();
+                    // if we can't parse the network let's just not handle the message for now - maybe
+                    status_map.get(&their_status.network_id).ok_or(P2PRelayError::UnsupportedChain("adf"))?.clone()
+                };
+                return self.send_to_peer(peer, Message::Status(our_status)).await;
             }
             Message::BlockBodies(block_bodies) => {
                 debug!(
@@ -395,10 +423,10 @@ impl P2PRelay {
                 );
             }
             Message::GetBlockBodies(get_block_bodies) => {
-                debug!("get block bodes from {}: {:?}", peer, get_block_bodies);
+                info!("get block bodes from {}: {:?}", peer, get_block_bodies);
             }
             Message::GetBlockHeaders(get_block_headers) => {
-                debug!("get block headers from {}: {:?}", peer, get_block_headers);
+                info!("get block headers from {}: {:?}", peer, get_block_headers);
                 // send this to any peer!
                 let next_request_id = self.current_request_id.fetch_add(1, Ordering::SeqCst);
                 debug!(
@@ -566,21 +594,11 @@ fn transaction_from_message(
 #[async_trait]
 impl CapabilityServer for P2PRelay {
     fn on_peer_connect(&self, peer: PeerId, _caps: HashMap<CapabilityName, CapabilityVersion>) {
-        let first_events = if let Some(status_message) = &*self.status_message.read() {
-            let mut status_data = BytesMut::new();
-            status_message.encode(&mut status_data);
-            vec![OutboundEvent::Message {
-                capability_name: capability_name(),
-                message: DevP2PMessage {
-                    id: EthMessageId::Status as usize,
-                    data: status_data.freeze(),
-                },
-            }]
-        } else {
-            vec![OutboundEvent::Disconnect {
+        let disconnect_event = self.status_map.read().is_empty().then(||
+            OutboundEvent::Disconnect {
                 reason: DisconnectReason::DisconnectRequested,
-            }]
-        };
+            }
+        );
 
         let (sender, mut receiver) = channel(1);
         self.setup_peer(
@@ -588,7 +606,7 @@ impl CapabilityServer for P2PRelay {
             Pipes {
                 sender,
                 receiver: Arc::new(AsyncMutex::new(Box::pin(stream! {
-                    for event in first_events {
+                    if let Some(event) = disconnect_event {
                         yield event;
                     }
 
@@ -606,7 +624,7 @@ impl CapabilityServer for P2PRelay {
                 if let Some(DisconnectReason::UselessPeer) = reason {
                     info!("Peer {} disconnected because we are a useless peer", peer);
                 }
-                debug!(
+                info!(
                     "Peer {} disconnect (reason: {:?}), tearing down peer.",
                     peer, reason
                 );
