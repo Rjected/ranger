@@ -20,8 +20,8 @@ ranger = { path = "../" }
 # TODO: condense extra features needed and determine if necessary, or if they
 # can be upstreamed
 tracing = { version = "0.1.29", default-features = false }
-akula = { git = "https://github.com/Rjected/akula", branch = "simple-relayer" }
-fastrlp = { git = "https://github.com/Rjected/fastrlp", branch = "implement-ethereum-types" }
+akula = { git = "https://github.com/akula-bft/akula" }
+fastrlp = { git = "https://github.com/vorot93/fastrlp" }
 ethereum-forkid = { version = "0.8.0", default-features = false }
 rlp-derive = { version = "0.1.0", default-features = false }
 rlp = { version = "0.5.1", default-features = false }
@@ -30,7 +30,7 @@ async-stream = { version = "0.3.2" }
 tokio-stream = { version = "0.1" }
 parking_lot = { version = "0.12.0", default-features = false }
 bytes = { version = "1.1", default-features = false }
-tracing-subscriber = { version = "0.3", default-features = false }
+tracing-subscriber = { version = "0.3.11", default-features = false }
 trust-dns-resolver = { version = "0.21" }
 # determine if necessary
 task-group = { git = "https://github.com/vorot93/task-group" }

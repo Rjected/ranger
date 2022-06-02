@@ -14,13 +14,13 @@ use clap::Parser;
 use ethereum_forkid::{ForkHash, ForkId};
 use ethereum_types::H256;
 use maplit::btreemap;
-use ranger::relay::{P2PRelay, MempoolListener};
+use ranger::relay::{MempoolListener, P2PRelay};
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use std::collections::HashMap;
 use std::{num::NonZeroUsize, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 use task_group::TaskGroup;
 use tokio::time::sleep;
-use tokio_stream::{StreamMap, StreamExt};
+use tokio_stream::{StreamExt, StreamMap};
 use tracing::{info, trace, warn};
 use tracing_subscriber::{
     prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter,
@@ -303,8 +303,7 @@ async fn main() -> anyhow::Result<()> {
     let genesis_status = StatusMessage {
         protocol_version: EthProtocolVersion::Eth66 as usize,
         network_id: 1,
-        total_difficulty: akula::models::U256::from_str_radix("0", 10)
-            .unwrap(),
+        total_difficulty: akula::models::U256::from_str_radix("0", 10).unwrap(),
         best_hash: H256::from_str(
             "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3",
         )
@@ -322,8 +321,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // tell the relay to use this status message
-    let relay = P2PRelay::new(protocol_version)
-        .with_status(genesis_status);
+    let relay = P2PRelay::new(protocol_version).with_status(genesis_status);
     let relay = Arc::new(relay);
     let no_new_peers = relay.no_new_peers_handle();
 
