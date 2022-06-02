@@ -1,67 +1,50 @@
 use akula::{
-    models::{MessageWithSignature, ChainId},
+    p2p::types::{Message, GetPooledTransactions, Status},
     sentry::{
         devp2p::{
             CapabilityName, CapabilityServer, CapabilityVersion, DisconnectReason, InboundEvent,
             Message as DevP2PMessage, OutboundEvent, PeerId,
         },
-        eth::{capability_name, EthProtocolVersion},
-    },
-    sentry_connector::{
-        message_decoder::*,
-        messages::{EthMessageId, GetPooledTransactionsMessage, Message, StatusMessage, GetBlockHeadersMessage},
+        eth::EthProtocolVersion,
     },
 };
-use async_stream::stream;
 use async_trait::async_trait;
-use bytes::BytesMut;
-use ethereum_types::{H256, U256, U64};
-use ethers::core::types::{
-    transaction::{eip2718::TypedTransaction, eip2930::AccessListItem},
-    Chain, Eip1559TransactionRequest, Eip2930TransactionRequest, NameOrAddress, ParseChainError,
-    Signature, TransactionRequest, H512, TxHash
+use ethereum_types::{H256, U256};
+use ethers::{
+    core::types::{
+        transaction::eip2718::TypedTransaction,
+        Chain, ParseChainError, TxHash, H512,
+    },
+    prelude::{Transaction, Block},
 };
-use fastrlp::Encodable as FastEncodable;
-use futures_core::stream::BoxStream;
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
-    convert::TryFrom,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
     },
-    time::Duration,
     usize,
 };
 use thiserror::Error;
-use tokio::sync::{
-    mpsc::{channel, error::SendTimeoutError, Sender},
-    Mutex as AsyncMutex,
-};
-use tokio_stream::{StreamExt, wrappers::{BroadcastStream, errors::BroadcastStreamRecvError}};
+// use tokio::sync::mpsc::{channel, error::SendTimeoutError, Receiver, Sender};
+use tokio::sync::broadcast::{channel, Receiver, Sender, error::SendError};
+use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tracing::{debug, info};
 
-use crate::p2p_api::{SignedTx, MempoolListener, DedupStream};
+use crate::p2p_api::{DedupStream, MempoolListener, SignedTx};
 
-/// The channel for sending messages to a peer
-type OutboundSender = Sender<OutboundEvent>;
-
-/// The channel for receiving messages from a peer
-type OutboundReceiver = Arc<AsyncMutex<BoxStream<'static, OutboundEvent>>>;
-
-/// This represents an active connection with a peer, containing a sender and receiver which can be
-/// used to interact with the peer.
-#[derive(Clone)]
-struct Pipes {
-    sender: OutboundSender,
-    receiver: OutboundReceiver,
+/// Contains the sender and receiver structs for a peer.
+#[derive(Debug)]
+pub struct Pipes {
+    sender: Sender<OutboundEvent>,
+    receiver: Receiver<OutboundEvent>,
 }
 
 /// P2PRelay contains information that is necessary for connecting to the ethereum gossip protocol.
 /// In order to make a connection, we need at least a status message and protocol version to send
 /// to new peers.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct P2PRelay {
     /// A map between a peer ID and the currently active connection with that peer.
     peer_pipes: Arc<RwLock<HashMap<PeerId, Pipes>>>,
@@ -74,7 +57,7 @@ pub struct P2PRelay {
     current_request_id: Arc<AtomicU32>,
 
     /// The status messages we hold for each chain
-    status_map: Arc<RwLock<HashMap<u64, StatusMessage>>>,
+    status_map: Arc<RwLock<HashMap<u64, Status>>>,
 
     /// Total work for each chain
     total_work_map: Arc<RwLock<HashMap<Chain, U256>>>,
@@ -90,6 +73,9 @@ pub struct P2PRelay {
 
     /// Transactions that will be streamed
     transaction_stream: Arc<RwLock<DedupStream<SignedTx>>>,
+
+    /// Blocks available for broadcast
+    // block_stream: Arc<RwLock<DedupStream<Block<Transaction>>>>,
 
     // TODO: lots of things in this struct are to be replaced with a multi peer sender / message
     // manager. We will un-queue requests that correspond to responses that we receive
@@ -123,7 +109,7 @@ pub enum P2PRelayError {
 
     /// Thrown if we time out when sending a message to a peer
     #[error("Timeout when sending message to a peer: {0}")]
-    SendTimeout(#[from] SendTimeoutError<OutboundEvent>),
+    SendTimeout(#[from] SendError<OutboundEvent>),
 
     /// Thrown if we get a response to a Get* message which includes a request ID we haven't
     /// included in any requests
@@ -156,6 +142,7 @@ impl P2PRelay {
             no_new_peers: Arc::new(AtomicBool::new(true)),
             transaction_stream: Default::default(),
             hashes_stream: Default::default(),
+            // block_stream: Default::default(),
             total_work_map: Default::default(),
             new_transactions: Default::default(),
             current_request_id: Arc::new(AtomicU32::new(0)),
@@ -165,11 +152,12 @@ impl P2PRelay {
     #[must_use]
     /// Adds the given status for use when sending handshakes to nodes.
     /// The input status will used during handshakes for the network contained in the status.
-    pub fn with_status(&self, status: StatusMessage) -> Self {
+    pub fn with_status(&self, status: Status) -> Self {
         let this = self.clone();
         {
             let mut status_map = this.status_map.write();
-            status_map.insert(status.network_id, status);
+            // status doesn't have a network id yet, can't do this anymore
+            // status_map.insert(status, status);
         }
 
         // mark as ready to accept connections because we have at least one status message
@@ -181,26 +169,24 @@ impl P2PRelay {
         self.no_new_peers.clone()
     }
 
-    fn setup_peer(&self, peer: PeerId, p: Pipes) {
+    /// Set upt the peer and add its open channels
+    fn setup_peer(&self, peer: PeerId, pipe: Pipes) {
         let mut pipes = self.peer_pipes.write();
 
-        pipes.entry(peer).or_insert(p);
+        pipes.entry(peer).or_insert(pipe);
     }
 
     /// Get the message sender channel for the given peer
-    pub fn sender(&self, peer: PeerId) -> Option<OutboundSender> {
+    pub fn sender(&self, peer: PeerId) -> Option<Sender<OutboundEvent>> {
         self.peer_pipes
             .read()
             .get(&peer)
-            .map(|pipes| pipes.sender.clone())
+            .map(|pipe| pipe.sender.clone())
     }
 
-    /// Get the message receiver channel for the given peer
-    fn receiver(&self, peer: PeerId) -> Option<OutboundReceiver> {
-        self.peer_pipes
-            .read()
-            .get(&peer)
-            .map(|pipes| pipes.receiver.clone())
+    /// Get a message receiver channel for the given peer
+    pub fn receiver(&self, peer: PeerId) -> Option<Receiver<OutboundEvent>> {
+        self.peer_pipes.read().get(&peer).map(|pipe| pipe.sender.subscribe())
     }
 
     /// Send an eth message to a peer. This relies on the capability name that is currently active.
@@ -211,22 +197,23 @@ impl P2PRelay {
     ) -> Result<(), P2PRelayError> {
         let sender_pipe = self.sender(peer).ok_or(P2PRelayError::CannotFindPeer)?;
 
-        let mut message_data = BytesMut::new();
-        eth_message.encode(&mut message_data);
+        // again, need more stable message types with encoding, decoding etc
+        // let mut message_data = BytesMut::new();
+        // eth_message.encode(&mut message_data);
 
-        let prepared_message = OutboundEvent::Message {
-            capability_name: capability_name(),
-            message: DevP2PMessage {
-                id: eth_message.eth_id() as usize,
-                data: message_data.freeze(),
-            },
-        };
+        // let prepared_message = OutboundEvent::Message {
+        //     capability_name: capability_name(),
+        //     message: DevP2PMessage {
+        //         id: eth_message.id() as usize,
+        //         data: message_data.freeze(),
+        //     },
+        // };
 
         // TODO: figure out what an appropriate timeout would be - should we even use timeouts?
-        sender_pipe
-            .send_timeout(prepared_message, Duration::from_millis(20))
-            .await
-            .map_err(P2PRelayError::SendTimeout)?;
+        // sender_pipe
+        //     .send_timeout(prepared_message, Duration::from_millis(20))
+        //     .await
+        //     .map_err(P2PRelayError::SendTimeout)?;
 
         Ok(())
     }
@@ -243,27 +230,35 @@ impl P2PRelay {
     ///
     /// }
     /// ```
-    async fn relay_to_other_peer(&self, no_relay_to: PeerId, eth_message: Message) -> Result<(), P2PRelayError> {
+    async fn relay_to_other_peer(
+        &self,
+        no_relay_to: PeerId,
+        eth_message: Message,
+    ) -> Result<(), P2PRelayError> {
         let all_peers = self.peer_pipes.read();
-        let (_next_peer, sender_pipe) = all_peers.iter().find(|kv| kv.0 == &no_relay_to).ok_or(P2PRelayError::CannotFindRelayPeer)?;
+        let (_next_peer, sender_pipe) = all_peers
+            .iter()
+            .find(|kv| kv.0 == &no_relay_to)
+            .ok_or(P2PRelayError::CannotFindRelayPeer)?;
 
-        let mut message_data = BytesMut::new();
-        eth_message.encode(&mut message_data);
+        // again, need more stable message types with encoding, decoding etc
+        // let mut message_data = BytesMut::new();
+        // eth_message.encode(&mut message_data);
 
-        let prepared_message = OutboundEvent::Message {
-            capability_name: capability_name(),
-            message: DevP2PMessage {
-                id: eth_message.eth_id() as usize,
-                data: message_data.freeze(),
-            },
-        };
+        // let prepared_message = OutboundEvent::Message {
+        //     capability_name: capability_name(),
+        //     message: DevP2PMessage {
+        //         id: eth_message.id() as usize,
+        //         data: message_data.freeze(),
+        //     },
+        // };
 
         // TODO: figure out what an appropriate timeout would be - should we even use timeouts?
-        sender_pipe
-            .sender
-            .send_timeout(prepared_message, Duration::from_millis(20))
-            .await
-            .map_err(P2PRelayError::SendTimeout)?;
+        // sender_pipe
+        //     .sender
+        //     .send_timeout(prepared_message, Duration::from_millis(20))
+        //     .await
+        //     .map_err(P2PRelayError::SendTimeout)?;
 
         Ok(())
     }
@@ -290,8 +285,7 @@ impl P2PRelay {
                 let _ = sender
                     .send(OutboundEvent::Disconnect {
                         reason: DisconnectReason::ProtocolBreach,
-                    })
-                    .await;
+                    });
             }
             None => {
                 self.teardown_peer(peer);
@@ -307,21 +301,19 @@ impl P2PRelay {
     ) -> Result<(), P2PRelayError> {
         // This method just matches on a message type and processes it
         match message {
-            Message::Status(their_status) => {
-                debug!("Decoded status message from {}: {:?}", peer, their_status);
-                let our_status = {
-                    let status_map = self.status_map.read();
-                    // if we can't parse the network let's just not handle the message for now - maybe
-                    status_map.get(&their_status.network_id).ok_or(P2PRelayError::UnsupportedChain("adf"))?.clone()
-                };
-                return self.send_to_peer(peer, Message::Status(our_status)).await;
-            }
-            Message::BlockBodies(block_bodies) => {
-                debug!(
-                    "Decoded block bodies message from {}: {:?}",
-                    peer, block_bodies
-                );
-            }
+            // need more stable message enum
+            // Message::Status(their_status) => {
+            //     debug!("Decoded status message from {}: {:?}", peer, their_status);
+            //     let our_status = {
+            //         let status_map = self.status_map.read();
+            //         // if we can't parse the network let's just not handle the message for now
+            //         status_map
+            //             .get(&their_status.network_id)
+            //             .ok_or(P2PRelayError::UnsupportedChain("Unsupported chain!!!!"))?
+            //             .clone()
+            //     };
+            //     return self.send_to_peer(peer, Message::Status(our_status)).await;
+            // }
             Message::NewPooledTransactionHashes(new_pooled_transactions) => {
                 let num_txs_to_show = 8;
                 if new_pooled_transactions.0.len() >= num_txs_to_show {
@@ -370,29 +362,33 @@ impl P2PRelay {
                 return self
                     .send_to_peer(
                         peer,
-                        Message::GetPooledTransactions(GetPooledTransactionsMessage {
+                        Message::GetPooledTransactions(GetPooledTransactions{
                             request_id: next_request_id as u64,
-                            tx_hashes: filtered_txids,
+                            hashes: filtered_txids,
                         }),
-                    ).await;
+                    )
+                    .await;
             }
 
             Message::PooledTransactions(pooled_transactions) => {
                 let num_txs = pooled_transactions.transactions.len();
                 info!("got {:?} pooled transactions from {}", num_txs, peer);
 
-                for transaction in pooled_transactions.transactions {
-                    let (typed_tx, sig) = transaction_from_message(transaction.clone()).unwrap();
-                    let mut tx_stream = self.transaction_stream.write();
-                    // TODO: remove unwrap
-                    tx_stream.insert(&SignedTx {
-                        tx: typed_tx,
-                        sig,
-                    }).unwrap();
-                }
+                // TODO: need more stable conversions
+                // for transaction in pooled_transactions.transactions {
+                //     let (typed_tx, sig) = transaction_from_message(transaction.clone()).unwrap();
+                //     let mut tx_stream = self.transaction_stream.write();
+                //     // TODO: remove unwrap
+                //     tx_stream.insert(&SignedTx { tx: typed_tx, sig }).unwrap();
+                // }
             }
             Message::NewBlock(new_block) => {
                 debug!("new block: {:?} from {}", new_block, peer);
+                let block = new_block.block;
+                {
+                    // let block_stream = self.block_stream.write();
+                    // block_stream.insert(block);
+                }
             }
             Message::BlockHeaders(block_headers) => {
                 debug!(
@@ -407,15 +403,6 @@ impl P2PRelay {
             Message::Transactions(transactions) => {
                 debug!("transactions from {}: {:?}", peer, transactions);
             }
-            Message::NodeData(node_data) => {
-                debug!("node data from {}: {:?}", peer, node_data);
-            }
-            Message::Receipts(receipts) => {
-                debug!("receipts from {}: {:?}", peer, receipts);
-            }
-            Message::GetReceipts(get_receipts) => {
-                debug!("get receipts from {}: {:?}", peer, get_receipts);
-            }
             Message::GetPooledTransactions(get_pooled_transactions) => {
                 debug!(
                     "get pooled transactions from {}: {:?}",
@@ -428,23 +415,9 @@ impl P2PRelay {
             Message::GetBlockHeaders(get_block_headers) => {
                 info!("get block headers from {}: {:?}", peer, get_block_headers);
                 // send this to any peer!
-                let next_request_id = self.current_request_id.fetch_add(1, Ordering::SeqCst);
-                debug!(
-                    "Relaying GetBlockHeadersMessage with request id {} to peer {}",
-                    next_request_id, peer
-                );
-                return self
-                    .send_to_peer(
-                        peer,
-                        Message::GetBlockHeaders(GetBlockHeadersMessage {
-                            request_id: next_request_id as u64,
-                            params: get_block_headers.params,
-                        }),
-                    )
-                    .await;
             }
-            Message::GetNodeData(get_node_data) => {
-                debug!("get node data from {}: {:?}", peer, get_node_data);
+            _ => {
+                // debug!("other message received");
             }
         };
         Ok(())
@@ -456,7 +429,7 @@ impl P2PRelay {
 impl MempoolListener for P2PRelay {
     type TxStream = BroadcastStream<SignedTx>;
     type TxHashStream = BroadcastStream<TxHash>;
-
+    type BlockStream = BroadcastStream<Block<Transaction>>;
     type Error = P2PRelayError;
     type BroadcastError = BroadcastStreamRecvError;
 
@@ -469,152 +442,44 @@ impl MempoolListener for P2PRelay {
         let hashes = self.hashes_stream.read();
         Ok(BroadcastStream::new(hashes.sender.subscribe()))
     }
-}
 
-// Creates an accurate v based on a chain id and y parity. used for akula -> ethers type conversion
-fn v_from_chain_id_parity(odd_y_parity: bool, chain_id: Option<ChainId>) -> u64 {
-    if let Some(chain_id_real) = chain_id {
-        chain_id_real.0 * 2 + 35 + odd_y_parity as u64
-    } else {
-        27 + odd_y_parity as u64
+    fn subscribe_blocks(&self) -> Result<Self::BlockStream, Self::Error> {
+        // let blocks = self.blocks;
+        todo!()
     }
-}
-
-// Just converts the akula MessageWithSignature (with an included hash) to a TypedTransaction.
-// MessageWithSignature contains enough information to recover the sender, so we need to do that
-// and populate the TypedTransaction
-fn transaction_from_message(
-    transaction: MessageWithSignature,
-) -> Result<(TypedTransaction, Signature), rlp::DecoderError> {
-    // TODO: remove unwrap
-    let from = transaction.recover_sender().unwrap();
-    let to = match transaction.message.action() {
-        akula::models::TransactionAction::Create => None,
-        akula::models::TransactionAction::Call(address) => Some(NameOrAddress::Address(address)),
-    };
-
-    // MessageWithSignature uses H256 types, R is a coordinate not a hash
-    let sig = Signature {
-        r: U256::from(&transaction.r().0),
-        s: U256::from(&transaction.s().0),
-        v: v_from_chain_id_parity(transaction.signature.odd_y_parity(), transaction.message.chain_id()),
-    };
-
-    let ethers_chain_id = transaction
-        .message
-        .chain_id()
-        .map(|akula_chain_id| U64::from(akula_chain_id.0));
-
-    // convert from akula's tx type to ethers - it seems like there is a bit of duplicated work
-    // here. geth would probably accept gigantic nonces, but akula would not (due to the u64)
-    let tx_result = match transaction.message {
-        akula::models::Message::Legacy {
-            chain_id: _,
-            nonce,
-            gas_price,
-            gas_limit,
-            action: _,
-            value,
-            input,
-        } => TypedTransaction::Legacy(TransactionRequest {
-            from: Some(from),
-            to,
-            gas_price: Some(U256::from_big_endian(&gas_price.to_be_bytes())),
-            gas: Some(U256::from(gas_limit)),
-            value: Some(U256::from_big_endian(&value.to_be_bytes())),
-            nonce: Some(U256::from(nonce)),
-            chain_id: ethers_chain_id,
-            data: Some(input.into()),
-        }),
-        akula::models::Message::EIP2930 {
-            chain_id: _,
-            nonce,
-            gas_price,
-            gas_limit,
-            action: _,
-            value,
-            input,
-            access_list,
-        } => TypedTransaction::Eip2930(Eip2930TransactionRequest {
-            tx: TransactionRequest {
-                from: Some(from),
-                to,
-                gas_price: Some(U256::from_big_endian(&gas_price.to_be_bytes())),
-                gas: Some(U256::from(gas_limit)),
-                value: Some(U256::from_big_endian(&value.to_be_bytes())),
-                nonce: Some(U256::from(nonce)),
-                chain_id: ethers_chain_id,
-                data: Some(input.into()),
-            },
-            access_list: access_list
-                .iter()
-                .map(|item| AccessListItem {
-                    address: item.address,
-                    storage_keys: item.slots.clone(),
-                })
-                .collect::<Vec<AccessListItem>>()
-                .into(),
-        }),
-        akula::models::Message::EIP1559 {
-            chain_id: _,
-            nonce,
-            max_priority_fee_per_gas,
-            max_fee_per_gas,
-            gas_limit,
-            action: _,
-            value,
-            input,
-            access_list,
-        } => TypedTransaction::Eip1559(Eip1559TransactionRequest {
-            from: Some(from),
-            to,
-            gas: Some(U256::from(gas_limit)),
-            value: Some(U256::from_big_endian(&value.to_be_bytes())),
-            nonce: Some(U256::from(nonce)),
-            chain_id: ethers_chain_id,
-            data: Some(input.into()),
-            access_list: access_list
-                .iter()
-                .map(|item| AccessListItem {
-                    address: item.address,
-                    storage_keys: item.slots.clone(),
-                })
-                .collect::<Vec<AccessListItem>>()
-                .into(),
-            max_fee_per_gas: Some(U256::from_big_endian(&max_fee_per_gas.to_be_bytes())),
-            max_priority_fee_per_gas: Some(U256::from_big_endian(
-                &max_priority_fee_per_gas.to_be_bytes(),
-            )),
-        }),
-    };
-
-    Ok((tx_result, sig))
 }
 
 #[async_trait]
 impl CapabilityServer for P2PRelay {
     fn on_peer_connect(&self, peer: PeerId, _caps: HashMap<CapabilityName, CapabilityVersion>) {
-        let disconnect_event = self.status_map.read().is_empty().then(||
-            OutboundEvent::Disconnect {
-                reason: DisconnectReason::DisconnectRequested,
-            }
-        );
+        let disconnect_event =
+            self.status_map
+                .read()
+                .is_empty()
+                .then(|| OutboundEvent::Disconnect {
+                    reason: DisconnectReason::DisconnectRequested,
+                });
 
         let (sender, mut receiver) = channel(1);
         self.setup_peer(
             peer,
+            // we need to send the receiver here to the next() method
             Pipes {
                 sender,
-                receiver: Arc::new(AsyncMutex::new(Box::pin(stream! {
-                    if let Some(event) = disconnect_event {
-                        yield event;
-                    }
+                receiver,
+            }
+            // Pipes {
+            //     sender,
+            //     receiver: Arc::new(AsyncMutex::new(Box::pin(stream! {
+            //         if let Some(event) = disconnect_event {
+            //             yield event;
+            //         }
 
-                    while let Some(event) = receiver.recv().await {
-                        yield event;
-                    }
-                }))),
-            },
+            //         while let Some(event) = receiver.recv().await {
+            //             yield event;
+            //         }
+            //     }))),
+            // },
         );
     }
 
@@ -634,26 +499,30 @@ impl CapabilityServer for P2PRelay {
                 message: DevP2PMessage { id, data },
                 ..
             } => {
-                let eth_message_id = match EthMessageId::try_from(id) {
-                    Ok(eth_message_id) => eth_message_id,
-                    Err(error) => {
-                        debug!("Invalid Eth message ID: {}! Kicking peer.", error);
-                        self.disconnect_peer(peer).await;
-                        return;
-                    }
-                };
-                let eth_message = match decode_rlp_message(eth_message_id, &data) {
-                    Ok(message_id) => message_id,
-                    Err(error) => {
-                        debug!("Error decoding devp2p message: {}! Kicking peer.", error);
-                        self.disconnect_peer(peer).await;
-                        return;
-                    }
-                };
-                if let Err(reason) = self.handle_eth_message(peer, eth_message).await {
-                    debug!("Error handling devp2p message: {}! Kicking peer.", reason);
-                    self.disconnect_peer(peer).await;
-                }
+                // id from int does not exist any more
+                // let eth_message_id = match EthMessageId::try_from(id) {
+                //     Ok(eth_message_id) => eth_message_id,
+                //     Err(error) => {
+                //         debug!("Invalid Eth message ID: {}! Kicking peer.", error);
+                //         self.disconnect_peer(peer).await;
+                //         return;
+                //     }
+                // };
+
+                // can't do this any more either - status changed
+                // self.send_to_peer(peer, Message::Status(our_status)).await;
+                // let eth_message = match decode_rlp_message(eth_message_id, &data) {
+                //     Ok(message_id) => message_id,
+                //     Err(error) => {
+                //         debug!("Error decoding devp2p message: {}! Kicking peer.", error);
+                //         self.disconnect_peer(peer).await;
+                //         return;
+                //     }
+                // };
+                // if let Err(reason) = self.handle_eth_message(peer, eth_message).await {
+                //     debug!("Error handling devp2p message: {}! Kicking peer.", reason);
+                //     self.disconnect_peer(peer).await;
+                // }
             }
         };
     }
@@ -661,9 +530,7 @@ impl CapabilityServer for P2PRelay {
     async fn next(&self, peer: PeerId) -> OutboundEvent {
         self.receiver(peer)
             .unwrap()
-            .lock()
-            .await
-            .next()
+            .recv()
             .await
             .unwrap_or(OutboundEvent::Disconnect {
                 reason: DisconnectReason::DisconnectRequested,

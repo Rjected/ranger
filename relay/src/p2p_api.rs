@@ -1,21 +1,22 @@
 use async_trait::async_trait;
+use ethers::{core::types::{transaction::eip2718::TypedTransaction, Signature, TxHash}, prelude::{Block, Transaction}};
 use futures_core::Stream;
-use ethers::core::types::{TxHash, transaction::eip2718::TypedTransaction, Signature};
-use tokio::sync::broadcast::{Sender, self, error::SendError};
-use std::{error::Error, fmt::Debug, collections::{HashSet, hash_map::DefaultHasher}, hash::{Hash, Hasher}};
-use tokio_stream::{StreamExt, wrappers::BroadcastStream};
-use tracing::debug;
+use std::{
+    collections::{hash_map::DefaultHasher, HashSet},
+    error::Error,
+    fmt::Debug,
+    hash::{Hash, Hasher},
+};
+use tokio::sync::broadcast::{self, error::SendError, Sender};
 
 /// A trait for sending eth p2p messages to a peer
-pub trait P2PSender {
-
-}
+pub trait P2PSender {}
 
 /// Contains a typed transaction request and a signature
-#[derive(Clone, Eq, Debug)]
+#[derive(Clone, Debug)]
 pub struct SignedTx {
     pub tx: TypedTransaction,
-    pub sig: Signature
+    pub sig: Signature,
 }
 
 // Hash implementation so it can be used in a HashSet
@@ -25,6 +26,7 @@ impl Hash for SignedTx {
     }
 }
 
+// // NOTE: we only need this until ethers has Eq for TypedTransaction
 impl PartialEq for SignedTx {
     fn eq(&self, other: &Self) -> bool {
         let mut hasher = DefaultHasher::new();
@@ -38,11 +40,14 @@ impl PartialEq for SignedTx {
     }
 }
 
+impl Eq for SignedTx {}
+
 /// Provides a stream based interface for listening to pending transactions
 #[async_trait]
 pub trait MempoolListener: Sync + Send {
     type TxStream: Stream<Item = Result<SignedTx, Self::BroadcastError>> + Send + Unpin;
     type TxHashStream: Stream<Item = Result<TxHash, Self::BroadcastError>> + Send + Unpin;
+    type BlockStream: Stream<Item = Result<Block<Transaction>, Self::BroadcastError>> + Send + Unpin;
 
     // TODO: make associated types nicer
     type BroadcastError: Sync + Send + Error;
@@ -53,9 +58,13 @@ pub trait MempoolListener: Sync + Send {
 
     /// Subscribe to the incoming pending transaction hashes
     fn subscribe_pending_hashes(&self) -> Result<Self::TxHashStream, Self::Error>;
+
+    /// Subscribe to incoming blocks
+    fn subscribe_blocks(&self) -> Result<Self::BlockStream, Self::Error>;
 }
 
 /// Provides a deduplicating container for transactions
+#[derive(Clone, Debug)]
 pub struct DedupStream<M> {
     pub sender: Sender<M>,
 
@@ -64,8 +73,10 @@ pub struct DedupStream<M> {
     pub set: HashSet<M>,
 }
 
-impl<M> DedupStream<M> where
-    M: Clone + Eq + Hash + Debug {
+impl<M> DedupStream<M>
+where
+    M: Clone + Eq + Hash + Debug,
+{
     /// Creates a new DedupStream with a capacity of 16384.
     pub fn new() -> Self {
         Self::new_with_capacity(16384)
@@ -86,15 +97,17 @@ impl<M> DedupStream<M> where
     /// If the stream already broadcasted this value, false is returned.
     pub fn insert(&mut self, item: &M) -> Result<bool, SendError<M>> {
         if self.set.insert(item.clone()) {
-            self.sender.send(item.clone()).map(|_| {Ok(true)})?
+            self.sender.send(item.clone()).map(|_| Ok(true))?
         } else {
             Ok(false)
         }
     }
 }
 
-impl<M> Default for DedupStream<M> where
-    M: Clone + Eq + Hash + Debug {
+impl<M> Default for DedupStream<M>
+where
+    M: Clone + Eq + Hash + Debug,
+{
     fn default() -> Self {
         DedupStream::new()
     }
@@ -102,6 +115,8 @@ impl<M> Default for DedupStream<M> where
 
 #[tokio::test]
 async fn test_proper_dedup() {
+    use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+
     let same_elem = 1;
     let next_elem = 2;
     let mut new_dedup = DedupStream::<usize>::new_with_capacity(4);
