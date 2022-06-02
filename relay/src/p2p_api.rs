@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use ethers::{core::types::{transaction::eip2718::TypedTransaction, Signature, TxHash}, prelude::{Block, Transaction}};
+use ethers::{
+    core::types::{transaction::eip2718::TypedTransaction, Signature, TxHash},
+    prelude::{Block, Transaction},
+};
 use futures_core::Stream;
 use std::{
     collections::{hash_map::DefaultHasher, HashSet},
