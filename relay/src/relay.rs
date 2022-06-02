@@ -1,5 +1,5 @@
 use akula::{
-    p2p::types::{Message, GetPooledTransactions, Status},
+    p2p::types::{GetPooledTransactions, Message, Status},
     sentry::{
         devp2p::{
             CapabilityName, CapabilityServer, CapabilityVersion, DisconnectReason, InboundEvent,
@@ -11,11 +11,8 @@ use akula::{
 use async_trait::async_trait;
 use ethereum_types::{H256, U256};
 use ethers::{
-    core::types::{
-        transaction::eip2718::TypedTransaction,
-        Chain, ParseChainError, TxHash, H512,
-    },
-    prelude::{Transaction, Block},
+    core::types::{transaction::eip2718::TypedTransaction, Chain, ParseChainError, TxHash, H512},
+    prelude::{Block, Transaction},
 };
 use parking_lot::RwLock;
 use std::{
@@ -28,7 +25,7 @@ use std::{
 };
 use thiserror::Error;
 // use tokio::sync::mpsc::{channel, error::SendTimeoutError, Receiver, Sender};
-use tokio::sync::broadcast::{channel, Receiver, Sender, error::SendError};
+use tokio::sync::broadcast::{channel, error::SendError, Receiver, Sender};
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tracing::{debug, info};
 
@@ -186,7 +183,10 @@ impl P2PRelay {
 
     /// Get a message receiver channel for the given peer
     pub fn receiver(&self, peer: PeerId) -> Option<Receiver<OutboundEvent>> {
-        self.peer_pipes.read().get(&peer).map(|pipe| pipe.sender.subscribe())
+        self.peer_pipes
+            .read()
+            .get(&peer)
+            .map(|pipe| pipe.sender.subscribe())
     }
 
     /// Send an eth message to a peer. This relies on the capability name that is currently active.
@@ -282,10 +282,9 @@ impl P2PRelay {
     async fn disconnect_peer(&self, peer: PeerId) {
         match self.sender(peer) {
             Some(sender) => {
-                let _ = sender
-                    .send(OutboundEvent::Disconnect {
-                        reason: DisconnectReason::ProtocolBreach,
-                    });
+                let _ = sender.send(OutboundEvent::Disconnect {
+                    reason: DisconnectReason::ProtocolBreach,
+                });
             }
             None => {
                 self.teardown_peer(peer);
@@ -362,7 +361,7 @@ impl P2PRelay {
                 return self
                     .send_to_peer(
                         peer,
-                        Message::GetPooledTransactions(GetPooledTransactions{
+                        Message::GetPooledTransactions(GetPooledTransactions {
                             request_id: next_request_id as u64,
                             hashes: filtered_txids,
                         }),
@@ -464,22 +463,18 @@ impl CapabilityServer for P2PRelay {
         self.setup_peer(
             peer,
             // we need to send the receiver here to the next() method
-            Pipes {
-                sender,
-                receiver,
-            }
-            // Pipes {
-            //     sender,
-            //     receiver: Arc::new(AsyncMutex::new(Box::pin(stream! {
-            //         if let Some(event) = disconnect_event {
-            //             yield event;
-            //         }
+            Pipes { sender, receiver }, // Pipes {
+                                        //     sender,
+                                        //     receiver: Arc::new(AsyncMutex::new(Box::pin(stream! {
+                                        //         if let Some(event) = disconnect_event {
+                                        //             yield event;
+                                        //         }
 
-            //         while let Some(event) = receiver.recv().await {
-            //             yield event;
-            //         }
-            //     }))),
-            // },
+                                        //         while let Some(event) = receiver.recv().await {
+                                        //             yield event;
+                                        //         }
+                                        //     }))),
+                                        // },
         );
     }
 
