@@ -503,6 +503,8 @@ impl CapabilityServer for P2PRelay {
                 //         return;
                 //     }
                 // };
+                let hex_data = hex::encode(data);
+                println!("{:?}", hex_data);
 
                 // can't do this any more either - status changed
                 // self.send_to_peer(peer, Message::Status(our_status)).await;
