@@ -11,7 +11,7 @@ use anyhow::Context;
 use cidr::IpCidr;
 use clap::Parser;
 use ethereum_forkid::{ForkHash, ForkId};
-use ethereum_types::H256;
+use hex_literal::hex;
 use maplit::btreemap;
 use ranger::relay::{MempoolListener, P2PRelay};
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
@@ -25,6 +25,9 @@ use tracing_subscriber::{
     prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter,
 };
 use trust_dns_resolver::TokioAsyncResolver;
+use ethp2p_rs::{Status, EthVersion};
+use foundry_config::Chain;
+use ruint::Uint;
 
 pub const BOOTNODES: &[&str] = &[
 	"enode://d860a01f9722d78051619d1e2351aba3f43f943f6f00718d1b9baa4101932a1f5011f16bb2b1bb35db20d6fe28fa0bf09636d26a87d31de9ec6203eeedb1f666@18.138.108.67:30303",   // bootnode-aws-ap-southeast-1-001
@@ -319,8 +322,21 @@ async fn main() -> anyhow::Result<()> {
     //     },
     // };
 
+    let status = Status {
+        version: EthVersion::Eth67 as u8,
+        // ethers versions arent the same due to patches, so using Id here
+        chain: Chain::Id(1),
+        total_difficulty: Uint::from(36206751599115524359527u128),
+        blockhash: hex!("feb27336ca7923f8fab3bd617fcb6e75841538f71c1bcfc267d7838489d9e13d"),
+        genesis: hex!("d4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3"),
+        forkid: ForkId {
+            hash: ForkHash([0xb7, 0x15, 0x07, 0x7d]),
+            next: 0,
+        },
+    };
+
     // tell the relay to use this status message
-    let relay = P2PRelay::new(protocol_version);
+    let relay = P2PRelay::new(protocol_version).with_status(status);
     let relay = Arc::new(relay);
     let no_new_peers = relay.no_new_peers_handle();
 
@@ -328,6 +344,7 @@ async fn main() -> anyhow::Result<()> {
         .with_task_group(tasks.clone())
         .with_listen_options(ListenOptions::new(
             discovery_tasks,
+            0, // min_peers
             opts.max_peers,
             listen_addr.parse().unwrap(),
             opts.cidr,
@@ -363,13 +380,13 @@ async fn main() -> anyhow::Result<()> {
             counter = 0;
         }
 
-        // if let Some(hash) = hashes_stream.next().await {
-        //     info!("New tx hash! {:?}", hash.unwrap())
-        // }
+        if let Some(hash) = hashes_stream.next().await {
+            info!("New tx hash! {:?}", hash.unwrap())
+        }
 
-        // if let Some(new_tx) = tx_stream.next().await {
-        //     info!("New tx! {:?}", new_tx.unwrap())
-        // }
+        if let Some(new_tx) = tx_stream.next().await {
+            info!("New tx! {:?}", new_tx.unwrap())
+        }
 
         sleep(Duration::from_millis(20)).await;
     }

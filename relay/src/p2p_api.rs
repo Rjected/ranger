@@ -1,56 +1,20 @@
 use async_trait::async_trait;
-use ethers::{
-    core::types::{transaction::eip2718::TypedTransaction, Signature, TxHash},
-    prelude::{Block, Transaction},
-};
 use futures_core::Stream;
 use std::{
-    collections::{hash_map::DefaultHasher, HashSet},
+    collections::HashSet,
     error::Error,
     fmt::Debug,
-    hash::{Hash, Hasher},
+    hash::Hash,
 };
 use tokio::sync::broadcast::{self, error::SendError, Sender};
-
-/// A trait for sending eth p2p messages to a peer
-pub trait P2PSender {}
-
-/// Contains a typed transaction request and a signature
-#[derive(Clone, Debug)]
-pub struct SignedTx {
-    pub tx: TypedTransaction,
-    pub sig: Signature,
-}
-
-// Hash implementation so it can be used in a HashSet
-impl Hash for SignedTx {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write(&self.tx.rlp_signed(&self.sig).0[..]);
-    }
-}
-
-// // NOTE: we only need this until ethers has Eq for TypedTransaction
-impl PartialEq for SignedTx {
-    fn eq(&self, other: &Self) -> bool {
-        let mut hasher = DefaultHasher::new();
-        self.hash(&mut hasher);
-        let first_hash = hasher.finish();
-
-        hasher = DefaultHasher::new();
-        other.hash(&mut hasher);
-
-        hasher.finish() == first_hash
-    }
-}
-
-impl Eq for SignedTx {}
+use anvil_core::eth::{transaction::TypedTransaction, block::Block};
 
 /// Provides a stream based interface for listening to pending transactions
 #[async_trait]
 pub trait MempoolListener: Sync + Send {
-    type TxStream: Stream<Item = Result<SignedTx, Self::BroadcastError>> + Send + Unpin;
-    type TxHashStream: Stream<Item = Result<TxHash, Self::BroadcastError>> + Send + Unpin;
-    type BlockStream: Stream<Item = Result<Block<Transaction>, Self::BroadcastError>> + Send + Unpin;
+    type TxStream: Stream<Item = Result<TypedTransaction, Self::BroadcastError>> + Send + Unpin;
+    type TxHashStream: Stream<Item = Result<[u8; 32], Self::BroadcastError>> + Send + Unpin;
+    type BlockStream: Stream<Item = Result<Block, Self::BroadcastError>> + Send + Unpin;
 
     // TODO: make associated types nicer
     type BroadcastError: Sync + Send + Error;

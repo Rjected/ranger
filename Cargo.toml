@@ -25,6 +25,22 @@ relay = { version = "^0.1.0", default-features = false, path = "./relay" }
 # Workaround - these are needed for akula to work as a dependency, since akula
 # itself uses these patches
 [patch.crates-io]
-arrayvec = { git = "https://github.com/vorot93/arrayvec", branch = "pop-unchecked" }
 enr = { git = "https://github.com/rust-ethereum/enr" }
 ethnum = { git = "https://github.com/vorot93/ethnum-rs", branch = "impls" }
+arrayvec = { git = "https://github.com/vorot93/arrayvec", branch = "pop-unchecked" }
+ethp2p-rs = { path = "../ethp2p-rs" }
+fastrlp = { git = "https://github.com/rjected/fastrlp", branch = "implement-ethereum-types", features = ["std", "derive", "ethereum-types"] }
+
+[patch."https://github.com/foundry-rs/foundry"]
+anvil-core = { git = "https://github.com/rjected/foundry", branch = "fastrlp" }
+anvil = { git = "https://github.com/rjected/foundry", branch = "fastrlp" }
+foundry-config = { git = "https://github.com/rjected/foundry", branch = "fastrlp" }
+
+[patch."https://github.com/gakonst/ethers-rs"]
+ethers = { git = "https://github.com/rjected/ethers-rs", branch = "fastrlp" }
+ethers-core = { git = "https://github.com/rjected/ethers-rs", branch = "fastrlp" }
+ethers-signers = { git = "https://github.com/rjected/ethers-rs", branch = "fastrlp" }
+ethers-etherscan = { git = "https://github.com/rjected/ethers-rs", branch = "fastrlp" }
+ethers-providers = { git = "https://github.com/rjected/ethers-rs", branch = "fastrlp" }
+ethers-solc = { git = "https://github.com/rjected/ethers-rs", branch = "fastrlp", features = ["async", "svm-solc"] }
+ethers-contract = { git = "https://github.com/rjected/ethers-rs", branch = "fastrlp" }

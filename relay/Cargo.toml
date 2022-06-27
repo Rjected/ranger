@@ -15,17 +15,12 @@ ethers-rs types
 """
 
 [dependencies]
-ethers = { git = "https://github.com/gakonst/ethers-rs", features = ["abigen", "legacy", "ws"] }
 serde = { version = "1.0.126", features = ["derive"] }
 
 # TODO: condense extra features needed and determine if necessary, or if they
 # can be upstreamed
 async-trait = "0.1"
 tracing = { version = "0.1.29", default-features = false }
-fastrlp = { git = "https://github.com/vorot93/fastrlp", features = [
-    "derive",
-] }
-anvil = { git = "http://github.com/foundry-rs/foundry" }
 akula = { git = "https://github.com/akula-bft/akula" }
 ethereum-forkid = { version = "0.10.0", default-features = false }
 rlp-derive = { version = "0.1.0", default-features = false }
@@ -54,5 +49,16 @@ secp256k1 = { version = "0.23", features = [
   "rand-std",
   "recovery",
 ] }
+
+# for p2p types
+ethp2p-rs = "0.1"
+anvil = { git = "http://github.com/foundry-rs/foundry" }
+anvil-core = { git = "https://github.com/foundry-rs/foundry" }
+fastrlp = { version = "0.1.0", features = ["alloc", "derive", "std"] }
+ethereum-forkid = { version = "0.8.0", default-features = false }
+ethers = { git = "https://github.com/gakonst/ethers-rs", features = ["abigen", "legacy", "ws"] }
+
+# for a string
+arrayvec = { version = "0.7", features = ["serde"] }
 
 [lib]
