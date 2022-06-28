@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use ethp2p_rs::EthMessage;
 use futures_core::Stream;
 use std::{
     collections::HashSet,
@@ -28,6 +29,13 @@ pub trait MempoolListener: Sync + Send {
 
     /// Subscribe to incoming blocks
     fn subscribe_blocks(&self) -> Result<Self::BlockStream, Self::Error>;
+}
+
+/// Represents an eth protocol message and an associated peer
+#[derive(Debug, Clone, PartialEq)]
+pub struct PeerMessage {
+    pub peer: [u8; 32],
+    pub message: EthMessage,
 }
 
 /// Provides a deduplicating container for transactions

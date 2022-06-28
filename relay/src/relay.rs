@@ -1,13 +1,9 @@
-use akula::sentry::{
-    devp2p::{
-        CapabilityName, CapabilityServer, CapabilityVersion, DisconnectReason, InboundEvent,
-        Message as DevP2PMessage, OutboundEvent, PeerId,
-    },
-    eth::EthProtocolVersion,
+use akula::sentry::devp2p::{
+    CapabilityName, CapabilityServer, CapabilityVersion, DisconnectReason, InboundEvent,
+    Message as DevP2PMessage, OutboundEvent, PeerId,
 };
 use async_trait::async_trait;
-use ethereum_types::U256;
-use ethers::core::types::{Chain, ParseChainError, H512};
+use ethers::core::types::{ParseChainError, H512};
 use parking_lot::RwLock;
 use std::{
     convert::TryFrom,
@@ -16,14 +12,13 @@ use std::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
     },
-    usize,
 };
 use arrayvec::{ArrayString, CapacityError};
 use thiserror::Error;
 use tokio::sync::broadcast::{channel, error::SendError, Receiver, Sender};
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tracing::{debug, info};
-use fastrlp::{Encodable, Decodable};
+use fastrlp::Encodable;
 use ethp2p_rs::{EthMessage, EthMessageID, Status, RequestPair, GetPooledTransactions, ProtocolMessage};
 use anvil_core::eth::{transaction::TypedTransaction, block::Block};
 use crate::p2p_api::{DedupStream, MempoolListener};
@@ -43,18 +38,11 @@ pub struct P2PRelay {
     /// A map between a peer ID and the currently active connection with that peer.
     peer_pipes: Arc<RwLock<HashMap<PeerId, Pipes>>>,
 
-    /// The protocol version to send during the RLPx handshake, to be included in a `Hello`
-    /// message.
-    protocol_version: EthProtocolVersion,
-
     /// Current request id
     current_request_id: Arc<AtomicU32>,
 
     /// The status messages we hold for each chain
-    status_map: Arc<RwLock<HashMap<u64, Status>>>,
-
-    /// Total work for each chain
-    total_work_map: Arc<RwLock<HashMap<Chain, U256>>>,
+    pub status_map: Arc<RwLock<HashMap<u64, Status>>>,
 
     /// The set of peers we're connected to.
     valid_peers: Arc<RwLock<HashSet<H512>>>,
@@ -70,6 +58,9 @@ pub struct P2PRelay {
 
     /// Blocks available for broadcast
     // block_stream: Arc<RwLock<DedupStream<Block<Transaction>>>>,
+
+    /// Request info we use for relaying.
+    requests_in_flight: Arc<RwLock<HashMap<InFlightRequest, RelayInfo>>>,
 
     // TODO: lots of things in this struct are to be replaced with a multi peer sender / message
     // manager. We will un-queue requests that correspond to responses that we receive
@@ -127,46 +118,48 @@ pub enum P2PRelayError {
     /// Thrown if there is an issue converting a string into an ArrayString
     #[error("String error: {0}")]
     StringError(#[from] CapacityError<&'static str>),
+
+    /// Thrown if there is an error inserting a transaction hash into the stream
+    #[error("Error inserting transaction hash into stream: {0}")]
+    TxHashSendError(#[from] SendError<[u8; 32]>),
+
+    /// Thrown if there is an error inserting a transaction into the stream
+    #[error("Error inserting transaction into stream: {0}")]
+    TxSendError(#[from] SendError<TypedTransaction>),
+
+    /// Thrown if we receive a BlockHeaders response but don't have a request in flight for it.
+    #[error("Received block headers response from peer {peer_id:?} with request id {request_id:?} but there is no request in flight")]
+    CannotFindRequest{
+        request_id: u64,
+        peer_id: PeerId
+    },
 }
 
 impl P2PRelay {
-    pub fn new(protocol_version: EthProtocolVersion) -> Self {
+    pub fn new() -> Self {
         debug!("P2PRelay started with debug");
-        Self {
-            peer_pipes: Default::default(),
-            protocol_version,
-            status_map: Default::default(),
-            valid_peers: Default::default(),
-            no_new_peers: Arc::new(AtomicBool::new(true)),
-            transaction_stream: Default::default(),
-            hashes_stream: Default::default(),
-            // block_stream: Default::default(),
-            total_work_map: Default::default(),
-            new_transactions: Default::default(),
-            current_request_id: Arc::new(AtomicU32::new(0)),
-        }
+        Self::default()
     }
 
     #[must_use]
     /// Adds the given status for use when sending handshakes to nodes.
     /// The input status will used during handshakes for the network contained in the status.
-    pub fn with_status(&self, status: Status) -> Self {
-        let this = self.clone();
+    pub fn with_status(self, status: Status) -> Self {
         {
-            let mut status_map = this.status_map.write();
+            let mut status_map = self.status_map.write();
             status_map.insert(status.chain.id(), status);
         }
 
         // mark as ready to accept connections because we have at least one status message
-        this.no_new_peers.store(false, Ordering::SeqCst);
-        this
+        self.no_new_peers.store(false, Ordering::SeqCst);
+        self
     }
 
     pub fn no_new_peers_handle(&self) -> Arc<AtomicBool> {
         self.no_new_peers.clone()
     }
 
-    /// Set upt the peer and add its open channels
+    /// Set up the peer and add its open channels
     fn setup_peer(&self, peer: PeerId, pipe: Pipes) {
         let mut pipes = self.peer_pipes.write();
 
@@ -200,8 +193,6 @@ impl P2PRelay {
         // again, need more stable message types with encoding, decoding etc
         let mut encoded_message = vec![];
         eth_message.encode(&mut encoded_message);
-        // let mut message_data = BytesMut::new();
-        // eth_message.encode(&mut message_data);
 
         let prepared_message = OutboundEvent::Message {
             capability_name: CapabilityName(ArrayString::from("eth")?),
@@ -220,11 +211,12 @@ impl P2PRelay {
     }
 
     /// Relays a message to any peer we are currently connected to besides this peer!
+    /// Returns the peer we sent the message to.
     /// TODO: want: a future on a message that is being sent to another peer (using a single peer
     /// OR multi peer sender). awaiting it should return Result<ExpectedResponseType, Error>.
     /// There are a bunch of messages in the eth protocol that you'd want responses from!
     /// Then we could basically do something like this:
-    /// ```
+    /// ```ignore
     /// async fn handle_message(&self, message: Message, peer: PeerId) {
     ///     // ensures we receive an answer to our query
     ///     let relay_response = self.send_eth_request(peer, message);
@@ -235,33 +227,21 @@ impl P2PRelay {
         &self,
         no_relay_to: PeerId,
         eth_message: EthMessage,
-    ) -> Result<(), P2PRelayError> {
-        let all_peers = self.peer_pipes.read();
-        let (_next_peer, sender_pipe) = all_peers
-            .iter()
-            .find(|kv| kv.0 == &no_relay_to)
-            .ok_or(P2PRelayError::CannotFindRelayPeer)?;
+    ) -> Result<PeerId, P2PRelayError> {
+        let next_peer = {
+            let peers = self.peer_pipes.read();
+            let pair = peers
+                .iter()
+                .find(|kv| kv.0 == &no_relay_to)
+                .ok_or(P2PRelayError::CannotFindRelayPeer)?;
+            let next_peer = *pair.0;
+            // explicitly drop peers because we don't need it and it shouldn't live any longer
+            drop(peers);
+            next_peer
+        };
 
-        // again, need more stable message types with encoding, decoding etc
-        // let mut message_data = BytesMut::new();
-        // eth_message.encode(&mut message_data);
-
-        // let prepared_message = OutboundEvent::Message {
-        //     capability_name: capability_name(),
-        //     message: DevP2PMessage {
-        //         id: eth_message.id() as usize,
-        //         data: message_data.freeze(),
-        //     },
-        // };
-
-        // TODO: figure out what an appropriate timeout would be - should we even use timeouts?
-        // sender_pipe
-        //     .sender
-        //     .send_timeout(prepared_message, Duration::from_millis(20))
-        //     .await
-        //     .map_err(P2PRelayError::SendTimeout)?;
-
-        Ok(())
+        self.send_to_peer(next_peer, eth_message).await?;
+        Ok(next_peer)
     }
 
     /// Remove the specified peer from the list of valid peers
@@ -317,42 +297,24 @@ impl P2PRelay {
                 return self.send_to_peer(peer, EthMessage::Status(our_status)).await;
             }
             EthMessage::NewPooledTransactionHashes(new_pooled_transactions) => {
-                let num_txs_to_show = 8;
-                if new_pooled_transactions.0.len() >= num_txs_to_show {
-                    let slice = new_pooled_transactions.0.split_at(num_txs_to_show).0;
-                    debug!(
-                        "{:?} NEW POOLED TX HASHES FROM {}! Here are {:?} of them: {:?}",
-                        new_pooled_transactions.0.len(),
-                        peer,
-                        num_txs_to_show,
-                        slice
-                    );
-                } else {
-                    debug!(
-                        "{:?} NEW POOLED TX HASHES FROM {}! Here are all of them: {:X?}",
-                        new_pooled_transactions.0.len(),
-                        peer,
-                        new_pooled_transactions.0
-                    );
-                }
+                // safely read from pooled_transactions
+                let pooled_transactions_rc = Arc::new(new_pooled_transactions);
 
-                // filter transactions that we've seen out of the request - we put this in its own
-                // block so the lock isn't held across an await
-                let filtered_txids: Vec<[u8; 32]> = {
+                // filter transactions out of the request that we've already seen
+                let filtered_txids = Box::pin(async {
                     let seen_txids = self.new_transactions.read();
-                    new_pooled_transactions
+                    pooled_transactions_rc
                         .0
                         .iter()
                         .filter_map(|seen| (!seen_txids.contains_key(seen)).then(|| *seen))
                         .collect()
-                };
+                });
 
                 // let's release the lock quickly
                 {
                     let mut hashes_stream = self.hashes_stream.write();
-                    for item in filtered_txids.clone() {
-                        // TODO: remove unwrap
-                        hashes_stream.insert(&item).unwrap();
+                    for item in &pooled_transactions_rc.0 {
+                        hashes_stream.insert(item)?;
                     }
                 }
 
@@ -366,55 +328,126 @@ impl P2PRelay {
                         peer,
                         EthMessage::GetPooledTransactions(RequestPair {
                             request_id: next_request_id as u64,
-                            message: GetPooledTransactions(filtered_txids),
+                            message: GetPooledTransactions(filtered_txids.await),
                         }),
                     )
                     .await;
             }
-
             EthMessage::PooledTransactions(RequestPair { request_id: _, message }) => {
                 let num_txs = message.0.len();
                 info!("got {:?} pooled transactions from {}", num_txs, peer);
-            }
-            EthMessage::NewBlock(new_block) => {
-                // debug!("new block: {:?} from {}", new_block, peer);
-                // let block = new_block.block;
-                // {
-                //     // let block_stream = self.block_stream.write();
-                //     // block_stream.insert(block);
-                // }
-            }
-            EthMessage::BlockHeaders(RequestPair { request_id: _, message }) => {
-                debug!(
-                    "{:?} new block headers from {}",
-                    message.0.len(),
-                    peer
-                );
-            }
-            EthMessage::NewBlockHashes(new_block_hashes) => {
-                debug!("new block hashes from {}: {:?}", peer, new_block_hashes);
+                {
+                    let mut txs_stream = self.transaction_stream.write();
+                    for item in message.0 {
+                        txs_stream.insert(&item)?;
+                    }
+                }
             }
             EthMessage::Transactions(transactions) => {
                 debug!("transactions from {}: {:?}", peer, transactions);
+                {
+                    let mut txs_stream = self.transaction_stream.write();
+                    for item in transactions.0 {
+                        txs_stream.insert(&item)?;
+                    }
+                }
             }
-            EthMessage::GetPooledTransactions(get_pooled_transactions) => {
-                debug!(
-                    "get pooled transactions from {}: {:?}",
-                    peer, get_pooled_transactions
-                );
+            EthMessage::GetBlockHeaders(RequestPair { request_id, message }) => {
+                // get a new request id
+                let next_request_id = self.current_request_id.fetch_add(1, Ordering::SeqCst);
+
+                // track the original request id
+                let tracking_info = RelayInfo {
+                    peer_id: peer,
+                    original_id: request_id,
+                };
+
+                // create and send the new request
+                let new_request = RequestPair {
+                    request_id: next_request_id as u64,
+                    message,
+                };
+
+                let new_peer = self.relay_to_other_peer(peer, new_request.into()).await?;
+                let in_flight = InFlightRequest {
+                    new_request_id: next_request_id as u64,
+                    peer_id: new_peer,
+                };
+
+                // TODO: can this be abstracted more somehow over request response message pairs?
+                // finally mark the request as in flight
+                {
+                    let mut requests = self.requests_in_flight.write();
+                    requests.insert(in_flight, tracking_info);
+                }
             }
-            EthMessage::GetBlockBodies(get_block_bodies) => {
-                info!("get block bodes from {}: {:?}", peer, get_block_bodies);
-            }
-            EthMessage::GetBlockHeaders(get_block_headers) => {
-                info!("get block headers from {}: {:?}", peer, get_block_headers);
-                // send this to any peer!
+            EthMessage::BlockHeaders(RequestPair { request_id, message }) => {
+                // construct the in flight request info
+
+                let request_key = InFlightRequest {
+                    new_request_id: request_id,
+                    peer_id: peer,
+                };
+
+                // get the original request id
+                let relay_info = {
+                    let mut in_flight = self.requests_in_flight.write();
+                    in_flight.remove(&request_key).ok_or(
+                        P2PRelayError::CannotFindRequest {
+                            request_id,
+                            peer_id: peer
+                        },
+                    )
+                }?;
+
+                // reconstruct the response
+                let response = RequestPair {
+                    request_id: relay_info.original_id,
+                    message,
+                };
+
+                // send the response to the original peer
+                self.send_to_peer(relay_info.peer_id, response.into()).await?;
             }
             _ => {
                 // debug!("other message received");
             }
         };
         Ok(())
+    }
+}
+
+/// Represents a peer and a request id that we sent to it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
+struct InFlightRequest {
+    /// The peer that we sent the relayed request to.
+    pub peer_id: PeerId,
+    /// The request id that we sent to the peer.
+    pub new_request_id: u64,
+}
+
+/// Represents information needed to track a relayed request.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
+pub struct RelayInfo {
+    /// The peer we are relaying messages to
+    pub peer_id: PeerId,
+    /// The request id that the peer sent us.
+    pub original_id: u64,
+}
+
+impl Default for P2PRelay {
+    fn default() -> Self {
+        Self {
+            peer_pipes: Default::default(),
+            status_map: Default::default(),
+            valid_peers: Default::default(),
+            no_new_peers: Arc::new(AtomicBool::new(true)),
+            transaction_stream: Default::default(),
+            requests_in_flight: Default::default(),
+            hashes_stream: Default::default(),
+            new_transactions: Default::default(),
+            current_request_id: Arc::new(AtomicU32::new(0)),
+        }
     }
 }
 
@@ -446,30 +479,12 @@ impl MempoolListener for P2PRelay {
 #[async_trait]
 impl CapabilityServer for P2PRelay {
     fn on_peer_connect(&self, peer: PeerId, _caps: HashMap<CapabilityName, CapabilityVersion>) {
-        let disconnect_event =
-            self.status_map
-                .read()
-                .is_empty()
-                .then(|| OutboundEvent::Disconnect {
-                    reason: DisconnectReason::DisconnectRequested,
-                });
-
-        let (sender, mut receiver) = channel(1);
+        // TODO: send disconnect events if there is no status
+        let (sender, receiver) = channel(1);
         self.setup_peer(
             peer,
             // we need to send the receiver here to the next() method
-            Pipes { sender, receiver }, // Pipes {
-                                        //     sender,
-                                        //     receiver: Arc::new(AsyncMutex::new(Box::pin(stream! {
-                                        //         if let Some(event) = disconnect_event {
-                                        //             yield event;
-                                        //         }
-
-                                        //         while let Some(event) = receiver.recv().await {
-                                        //             yield event;
-                                        //         }
-                                        //     }))),
-                                        // },
+            Pipes { sender, receiver },
         );
     }
 
@@ -489,16 +504,6 @@ impl CapabilityServer for P2PRelay {
                 message: DevP2PMessage { id, data },
                 ..
             } => {
-                // id from int does not exist any more
-                // let eth_message_id = match EthMessageId::try_from(id) {
-                //     Ok(eth_message_id) => eth_message_id,
-                //     Err(error) => {
-                //         debug!("Invalid Eth message ID: {}! Kicking peer.", error);
-                //         self.disconnect_peer(peer).await;
-                //         return;
-                //     }
-                // };
-
                 // has an unwrap...
                 let message_type = match EthMessageID::try_from(id) {
                     Ok(message_type) => message_type,
@@ -509,20 +514,12 @@ impl CapabilityServer for P2PRelay {
                         return
                     }
                 };
+
                 let hex_data = hex::encode(data.clone());
                 println!("rlp message with id {:?}, {:?}", id, hex_data);
+
                 let protocol_message = ProtocolMessage::decode_message(message_type, &mut &data[..]).unwrap();
 
-                // can't do this any more either - status changed
-                // self.send_to_peer(peer, Message::Status(our_status)).await;
-                // let eth_message = match decode_rlp_message(eth_message_id, &data) {
-                //     Ok(message_id) => message_id,
-                //     Err(error) => {
-                //         debug!("Error decoding devp2p message: {}! Kicking peer.", error);
-                //         self.disconnect_peer(peer).await;
-                //         return;
-                //     }
-                // };
                 if let Err(reason) = self.handle_eth_message(peer, protocol_message.message).await {
                     debug!("Error handling devp2p message: {}! Kicking peer.", reason);
                     self.disconnect_peer(peer).await;
@@ -539,5 +536,112 @@ impl CapabilityServer for P2PRelay {
             .unwrap_or(OutboundEvent::Disconnect {
                 reason: DisconnectReason::DisconnectRequested,
             })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::convert::TryFrom;
+
+    use crate::P2PRelay;
+    use akula::{p2p::node::PeerId, sentry::devp2p::OutboundEvent};
+    use hex_literal::hex;
+    use ethereum_forkid::{ForkId, ForkHash};
+    use ethp2p_rs::{Status, EthVersion, RequestPair, GetBlockHeaders, GetBlockBodies, BlockHashOrNumber, ProtocolMessage, EthMessageID, EthMessage};
+    use foundry_config::Chain;
+    use ruint::Uint;
+    use tokio::sync::broadcast::channel;
+    use tower::Service;
+
+    use super::Pipes;
+
+    #[tokio::test]
+    async fn test_call_with_existing_status() {
+        // this checks that we return an existing status if we have one
+        let status = Status {
+            version: EthVersion::Eth67 as u8,
+            // ethers versions arent the same due to patches, so using Id here
+            chain: Chain::Id(1),
+            total_difficulty: Uint::from(36206751599115524359527u128),
+            blockhash: hex!("feb27336ca7923f8fab3bd617fcb6e75841538f71c1bcfc267d7838489d9e13d"),
+            genesis: hex!("d4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3"),
+            forkid: ForkId {
+                hash: ForkHash([0xb7, 0x15, 0x07, 0x7d]),
+                next: 0,
+            },
+        };
+
+        // first add the status, then we will modify the status
+        let mut relay = P2PRelay::new()
+            .with_status(status);
+
+        let mut changed_status = status;
+        changed_status.blockhash = hex!("d4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3");
+        // double unwrap because we expect a status to be returned
+        let response = relay.call(changed_status.into()).await.unwrap().unwrap();
+
+        assert_eq!(response, status.into());
+    }
+
+    #[tokio::test]
+    async fn test_relaying_simple() {
+        let status = Status {
+            version: EthVersion::Eth67 as u8,
+            // ethers versions arent the same due to patches, so using Id here
+            chain: Chain::Id(1),
+            total_difficulty: Uint::from(36206751599115524359527u128),
+            blockhash: hex!("feb27336ca7923f8fab3bd617fcb6e75841538f71c1bcfc267d7838489d9e13d"),
+            genesis: hex!("d4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3"),
+            forkid: ForkId {
+                hash: ForkHash([0xb7, 0x15, 0x07, 0x7d]),
+                next: 0,
+            },
+        };
+
+        // first add the status, then we will modify the status
+        let mut relay = P2PRelay::new()
+            .with_status(status);
+
+        let first_peer_id = PeerId::random();
+        let (first_sender, first_receiver) = channel(1);
+        let first_peer = Pipes {
+            sender: first_sender,
+            receiver: first_receiver,
+        };
+        relay.setup_peer(first_peer_id, first_peer);
+
+        let second_peer_id = PeerId::random();
+        let (second_sender, second_receiver) = channel(1);
+
+        // need to subscribe so we can see the sent messages
+        let mut second_peer_recv = second_sender.subscribe();
+        let second_peer = Pipes {
+            sender: second_sender,
+            receiver: second_receiver,
+        };
+        relay.setup_peer(second_peer_id, second_peer);
+
+        let simple_get_block_headers = RequestPair {
+            request_id: 0,
+            message:  GetBlockHeaders {
+                start_block: BlockHashOrNumber::Number(0),
+                limit: 1,
+                skip: 0,
+                reverse: false,
+            },
+        };
+        relay.handle_eth_message(first_peer_id, simple_get_block_headers.clone().into()).await.unwrap();
+
+        // now we can check that the second peer got the message
+        // unwrap because we expect a message to be returned
+        let received_relay = match second_peer_recv.try_recv().unwrap() {
+            OutboundEvent::Message { message, .. } => message,
+            _ => panic!("Expected a message"),
+        };
+
+        // convert the message
+        let message_type = EthMessageID::try_from(received_relay.id).unwrap();
+        let received_message = ProtocolMessage::decode_message(message_type, &mut &received_relay.data[..]).unwrap();
+        assert_eq!(received_message.message, simple_get_block_headers.into());
     }
 }

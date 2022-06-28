@@ -58,7 +58,16 @@ fastrlp = { version = "0.1.0", features = ["alloc", "derive", "std"] }
 ethereum-forkid = { version = "0.8.0", default-features = false }
 ethers = { git = "https://github.com/gakonst/ethers-rs", features = ["abigen", "legacy", "ws"] }
 
+# for tower-rlpx
+tower = { version = "0.4", features = ["full"] }
+
 # for a string
 arrayvec = { version = "0.7", features = ["serde"] }
+
+[dev-dependencies]
+# for status
+foundry-config = { git = "http://github.com/foundry-rs/foundry" }
+ruint = { git = "https://github.com/recmo/uint", features = ["fastrlp", "serde"] }
+hex-literal = "0.3.4"
 
 [lib]
