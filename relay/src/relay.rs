@@ -232,7 +232,7 @@ impl P2PRelay {
             let peers = self.peer_pipes.read();
             let pair = peers
                 .iter()
-                .find(|kv| kv.0 == &no_relay_to)
+                .find(|kv| kv.0 != &no_relay_to)
                 .ok_or(P2PRelayError::CannotFindRelayPeer)?;
             let next_peer = *pair.0;
             // explicitly drop peers because we don't need it and it shouldn't live any longer
@@ -547,8 +547,9 @@ mod test {
     use akula::{p2p::node::PeerId, sentry::devp2p::OutboundEvent};
     use hex_literal::hex;
     use ethereum_forkid::{ForkId, ForkHash};
-    use ethp2p_rs::{Status, EthVersion, RequestPair, GetBlockHeaders, GetBlockBodies, BlockHashOrNumber, ProtocolMessage, EthMessageID, EthMessage};
+    use ethp2p_rs::{Status, EthVersion, RequestPair, GetBlockHeaders, BlockHashOrNumber, ProtocolMessage, EthMessageID, EthMessage, BlockHeaders};
     use foundry_config::Chain;
+    use anvil_core::eth::block::Header;
     use ruint::Uint;
     use tokio::sync::broadcast::channel;
     use tower::Service;
@@ -604,6 +605,8 @@ mod test {
 
         let first_peer_id = PeerId::random();
         let (first_sender, first_receiver) = channel(1);
+        // need to subscribe so we can see the sent messages
+        let mut first_peer_recv = first_sender.subscribe();
         let first_peer = Pipes {
             sender: first_sender,
             receiver: first_receiver,
@@ -643,5 +646,50 @@ mod test {
         let message_type = EthMessageID::try_from(received_relay.id).unwrap();
         let received_message = ProtocolMessage::decode_message(message_type, &mut &received_relay.data[..]).unwrap();
         assert_eq!(received_message.message, simple_get_block_headers.into());
+
+        let req_id = match received_message.message {
+            EthMessage::GetBlockHeaders(RequestPair { request_id, .. }) => request_id,
+            _ => panic!("Expected a GetBlockHeaders message"),
+        };
+
+        // now let's send a response
+        let response: RequestPair<BlockHeaders> = RequestPair {
+            request_id: req_id,
+            message: vec![
+                Header {
+                    parent_hash: hex!("0000000000000000000000000000000000000000000000000000000000000000").into(),
+                    ommers_hash: hex!("0000000000000000000000000000000000000000000000000000000000000000").into(),
+                    beneficiary: hex!("0000000000000000000000000000000000000000").into(),
+                    state_root: hex!("0000000000000000000000000000000000000000000000000000000000000000").into(),
+                    transactions_root: hex!("0000000000000000000000000000000000000000000000000000000000000000").into(),
+                    receipts_root: hex!("0000000000000000000000000000000000000000000000000000000000000000").into(),
+                    logs_bloom: hex!("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000").into(),
+                    difficulty: 0x8aeu64.into(),
+                    number: 0xd05u64.into(),
+                    gas_limit: 0x115cu64.into(),
+                    gas_used: 0x15b3u64.into(),
+                    timestamp: 0x1a0au64,
+                    extra_data: hex!("7788").into(),
+                    mix_hash: hex!("0000000000000000000000000000000000000000000000000000000000000000").into(),
+                    nonce: 0x0000000000000000u64.into(),
+                    base_fee_per_gas: None,
+                },
+            ].into(),
+        };
+
+        // finally send the message
+        relay.handle_eth_message(second_peer_id, response.clone().into()).await.unwrap();
+
+        // now we can check that the first peer got the message
+        // unwrap because we expect a message to be returned
+        let relayed_message = match first_peer_recv.try_recv().unwrap() {
+            OutboundEvent::Message { message, .. } => message,
+            _ => panic!("Expected a message"),
+        };
+
+        // convert the message
+        let message_type = EthMessageID::try_from(relayed_message.id).unwrap();
+        let final_response = ProtocolMessage::decode_message(message_type, &mut &relayed_message.data[..]).unwrap();
+        assert_eq!(final_response.message, response.into());
     }
 }
