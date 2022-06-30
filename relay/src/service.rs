@@ -1,13 +1,13 @@
 use crate::{P2PRelay, P2PRelayError};
-use tower::Service;
 use ethp2p_rs::EthMessage;
-use tracing::debug;
 use std::{
     future::Future,
-    sync::Arc,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
+use tower::Service;
+use tracing::debug;
 
 impl Service<EthMessage> for P2PRelay {
     /// The Response is an Option<EthMessage> because peers can return either a response to a

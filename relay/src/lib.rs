@@ -8,3 +8,6 @@ mod middleware;
 pub use crate::middleware::P2PMiddleware;
 
 mod service;
+
+mod peer_chains;
+pub use crate::peer_chains::PeerChains;

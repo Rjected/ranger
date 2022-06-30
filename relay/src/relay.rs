@@ -1,27 +1,34 @@
+use crate::{
+    p2p_api::{DedupStream, MempoolListener},
+    PeerChains,
+};
 use akula::sentry::devp2p::{
     CapabilityName, CapabilityServer, CapabilityVersion, DisconnectReason, InboundEvent,
     Message as DevP2PMessage, OutboundEvent, PeerId,
 };
+use anvil_core::eth::{block::Block, transaction::TypedTransaction};
+use arrayvec::{ArrayString, CapacityError};
 use async_trait::async_trait;
 use ethers::core::types::{ParseChainError, H512};
+use ethp2p_rs::{
+    EthMessage, EthMessageID, GetPooledTransactions, ProtocolMessage, RequestPair, Status,
+};
+use fastrlp::Encodable;
+use foundry_config::Chain;
 use parking_lot::RwLock;
 use std::{
-    convert::TryFrom,
     collections::{HashMap, HashSet},
+    convert::TryFrom,
+    fmt::Debug,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
     },
 };
-use arrayvec::{ArrayString, CapacityError};
 use thiserror::Error;
 use tokio::sync::broadcast::{channel, error::SendError, Receiver, Sender};
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tracing::{debug, info};
-use fastrlp::Encodable;
-use ethp2p_rs::{EthMessage, EthMessageID, Status, RequestPair, GetPooledTransactions, ProtocolMessage};
-use anvil_core::eth::{transaction::TypedTransaction, block::Block};
-use crate::p2p_api::{DedupStream, MempoolListener};
 
 /// Contains the sender and receiver structs for a peer.
 #[derive(Debug)]
@@ -58,6 +65,9 @@ pub struct P2PRelay {
 
     /// Blocks available for broadcast
     // block_stream: Arc<RwLock<DedupStream<Block<Transaction>>>>,
+
+    /// Two way map from peers to chains
+    peer_chains: Arc<RwLock<PeerChains>>,
 
     /// Request info we use for relaying.
     requests_in_flight: Arc<RwLock<HashMap<InFlightRequest, RelayInfo>>>,
@@ -129,10 +139,7 @@ pub enum P2PRelayError {
 
     /// Thrown if we receive a BlockHeaders response but don't have a request in flight for it.
     #[error("Received block headers response from peer {peer_id:?} with request id {request_id:?} but there is no request in flight")]
-    CannotFindRequest{
-        request_id: u64,
-        peer_id: PeerId
-    },
+    CannotFindRequest { request_id: u64, peer_id: PeerId },
 }
 
 impl P2PRelay {
@@ -164,6 +171,12 @@ impl P2PRelay {
         let mut pipes = self.peer_pipes.write();
 
         pipes.entry(peer).or_insert(pipe);
+    }
+
+    /// Set up the peer's chain
+    fn setup_peer_chain(&self, peer: PeerId, chain: Chain) {
+        let mut peer_chains = self.peer_chains.write();
+        peer_chains.add_peer(peer, chain);
     }
 
     /// Get the message sender channel for the given peer
@@ -230,9 +243,15 @@ impl P2PRelay {
     ) -> Result<PeerId, P2PRelayError> {
         let next_peer = {
             let peers = self.peer_pipes.read();
+            let peer_chains = self.peer_chains.read();
             let pair = peers
                 .iter()
-                .find(|kv| kv.0 != &no_relay_to)
+                .find(|kv| {
+                    // TODO: how can we remove this unwrap? Maybe we should group pipes by chain
+                    // directly rather than rely on pipes and chains being in sync?
+                    let no_relay_chain = peer_chains.get_chain(&no_relay_to).unwrap();
+                    kv.0 != &no_relay_to && peer_chains.is_on_chain(kv.0, no_relay_chain)
+                })
                 .ok_or(P2PRelayError::CannotFindRelayPeer)?;
             let next_peer = *pair.0;
             // explicitly drop peers because we don't need it and it shouldn't live any longer
@@ -247,8 +266,10 @@ impl P2PRelay {
     /// Remove the specified peer from the list of valid peers
     fn teardown_peer(&self, peer: PeerId) {
         let mut valid_peers = self.valid_peers.write();
+        let mut peer_chains = self.peer_chains.write();
         let peer_hash = H512::from_slice(peer.as_bytes());
         valid_peers.remove(&peer_hash);
+        peer_chains.remove_peer(peer);
     }
 
     pub fn all_peers(&self) -> HashSet<PeerId> {
@@ -281,7 +302,24 @@ impl P2PRelay {
     ) -> Result<(), P2PRelayError> {
         match message {
             EthMessage::Status(their_status) => {
-                debug!("Decoded status message from {}: {:?}", peer, their_status);
+                debug!("Decoded status message from {}: {:X?}", peer, their_status);
+                // TODO: I've seen some weird block messages from some other chains, it can be
+                // diffcult to figure out the exact format, especially when the source may not be
+                // available for these chains.
+                // For now, let's only accept named chains, and figure out how to be multi-chain
+                // without these types of issues
+                if let Chain::Id(id) = their_status.chain {
+                    self.teardown_peer(peer);
+                    debug!("Status message from {} is for chain {}. Not connecting, here's the chain: {:X?}", peer, id, their_status);
+                    return Ok(());
+                }
+
+                // Add the peer to the chain
+                {
+                    let mut peer_chains = self.peer_chains.write();
+                    peer_chains.add_peer(peer, their_status.chain);
+                }
+
                 let our_status = {
                     let mut status_map = self.status_map.write();
                     // if we can't find the other peer's status, add it to the map so we can send
@@ -294,21 +332,23 @@ impl P2PRelay {
                         }
                     }
                 };
-                return self.send_to_peer(peer, EthMessage::Status(our_status)).await;
+                return self
+                    .send_to_peer(peer, EthMessage::Status(our_status))
+                    .await;
             }
             EthMessage::NewPooledTransactionHashes(new_pooled_transactions) => {
                 // safely read from pooled_transactions
                 let pooled_transactions_rc = Arc::new(new_pooled_transactions);
 
                 // filter transactions out of the request that we've already seen
-                let filtered_txids = Box::pin(async {
+                let filtered_txids = {
                     let seen_txids = self.new_transactions.read();
                     pooled_transactions_rc
                         .0
                         .iter()
                         .filter_map(|seen| (!seen_txids.contains_key(seen)).then(|| *seen))
                         .collect()
-                });
+                };
 
                 // let's release the lock quickly
                 {
@@ -328,12 +368,15 @@ impl P2PRelay {
                         peer,
                         EthMessage::GetPooledTransactions(RequestPair {
                             request_id: next_request_id as u64,
-                            message: GetPooledTransactions(filtered_txids.await),
+                            message: GetPooledTransactions(filtered_txids),
                         }),
                     )
                     .await;
             }
-            EthMessage::PooledTransactions(RequestPair { request_id: _, message }) => {
+            EthMessage::PooledTransactions(RequestPair {
+                request_id: _,
+                message,
+            }) => {
                 let num_txs = message.0.len();
                 info!("got {:?} pooled transactions from {}", num_txs, peer);
                 {
@@ -352,68 +395,108 @@ impl P2PRelay {
                     }
                 }
             }
-            EthMessage::GetBlockHeaders(RequestPair { request_id, message }) => {
-                // get a new request id
-                let next_request_id = self.current_request_id.fetch_add(1, Ordering::SeqCst);
-
-                // track the original request id
-                let tracking_info = RelayInfo {
-                    peer_id: peer,
-                    original_id: request_id,
-                };
-
-                // create and send the new request
-                let new_request = RequestPair {
-                    request_id: next_request_id as u64,
-                    message,
-                };
-
-                let new_peer = self.relay_to_other_peer(peer, new_request.into()).await?;
-                let in_flight = InFlightRequest {
-                    new_request_id: next_request_id as u64,
-                    peer_id: new_peer,
-                };
-
-                // TODO: can this be abstracted more somehow over request response message pairs?
-                // finally mark the request as in flight
-                {
-                    let mut requests = self.requests_in_flight.write();
-                    requests.insert(in_flight, tracking_info);
-                }
+            EthMessage::GetBlockHeaders(get_block_headers) => {
+                self.send_relay_message(peer, get_block_headers).await?;
             }
-            EthMessage::BlockHeaders(RequestPair { request_id, message }) => {
-                // construct the in flight request info
-
-                let request_key = InFlightRequest {
-                    new_request_id: request_id,
-                    peer_id: peer,
-                };
-
-                // get the original request id
-                let relay_info = {
-                    let mut in_flight = self.requests_in_flight.write();
-                    in_flight.remove(&request_key).ok_or(
-                        P2PRelayError::CannotFindRequest {
-                            request_id,
-                            peer_id: peer
-                        },
-                    )
-                }?;
-
-                // reconstruct the response
-                let response = RequestPair {
-                    request_id: relay_info.original_id,
-                    message,
-                };
-
-                // send the response to the original peer
-                self.send_to_peer(relay_info.peer_id, response.into()).await?;
+            EthMessage::BlockHeaders(block_headers) => {
+                debug!(
+                    "block headers from {:?}: {:?}... RELAYING",
+                    peer, block_headers
+                );
+                self.receive_relay_message(peer, block_headers).await?;
+            }
+            EthMessage::GetBlockBodies(get_block_bodies) => {
+                self.send_relay_message(peer, get_block_bodies).await?;
+            }
+            EthMessage::BlockBodies(block_bodies) => {
+                self.receive_relay_message(peer, block_bodies).await?;
             }
             _ => {
                 // debug!("other message received");
             }
         };
         Ok(())
+    }
+
+    /// Sends a request to another peer
+    async fn send_relay_message<T>(
+        &self,
+        peer: PeerId,
+        request: RequestPair<T>,
+    ) -> Result<(), P2PRelayError>
+    where
+        RequestPair<T>: Into<EthMessage>,
+    {
+        // get a new request id
+        let next_request_id = self.current_request_id.fetch_add(1, Ordering::SeqCst);
+
+        // track the original request id
+        let tracking_info = RelayInfo {
+            peer_id: peer,
+            original_id: request.request_id,
+        };
+
+        // create and send the new request
+        let new_request = RequestPair {
+            request_id: next_request_id as u64,
+            message: request.message,
+        };
+
+        let new_peer = self.relay_to_other_peer(peer, new_request.into()).await?;
+        let in_flight = InFlightRequest {
+            new_request_id: next_request_id as u64,
+            peer_id: new_peer,
+        };
+
+        // finally mark the request as in flight
+        {
+            let mut requests = self.requests_in_flight.write();
+            requests.insert(in_flight, tracking_info);
+        }
+        Ok(())
+    }
+
+    /// Sends the given response to the peer that requested it
+    async fn receive_relay_message<T>(
+        &self,
+        peer: PeerId,
+        request: RequestPair<T>,
+    ) -> Result<(), P2PRelayError>
+    where
+        T: Debug,
+        RequestPair<T>: Into<EthMessage>,
+    {
+        // construct the in flight request info
+
+        let request_key = InFlightRequest {
+            new_request_id: request.request_id,
+            peer_id: peer,
+        };
+
+        // get the original request id
+        let relay_info = {
+            let mut in_flight = self.requests_in_flight.write();
+            in_flight
+                .remove(&request_key)
+                .ok_or(P2PRelayError::CannotFindRequest {
+                    request_id: request.request_id,
+                    peer_id: peer,
+                })
+        }?;
+
+        // reconstruct the response
+        let response = RequestPair {
+            request_id: relay_info.original_id,
+            message: request.message,
+        };
+
+        debug!(
+            "received response from {:?}, relaying to {:?}: {:?}",
+            peer, response, relay_info.peer_id
+        );
+
+        // send the response to the original peer
+        self.send_to_peer(relay_info.peer_id, response.into()).await
     }
 }
 
@@ -445,6 +528,7 @@ impl Default for P2PRelay {
             transaction_stream: Default::default(),
             requests_in_flight: Default::default(),
             hashes_stream: Default::default(),
+            peer_chains: Default::default(),
             new_transactions: Default::default(),
             current_request_id: Arc::new(AtomicU32::new(0)),
         }
@@ -511,16 +595,27 @@ impl CapabilityServer for P2PRelay {
                         debug!("Invalid Eth message ID: {}! Kicking peer.", error);
                         self.disconnect_peer(peer).await;
                         // stop the program
-                        return
+                        return;
                     }
                 };
 
-                let hex_data = hex::encode(data.clone());
-                println!("rlp message with id {:?}, {:?}", id, hex_data);
+                let protocol_message =
+                    ProtocolMessage::decode_message(message_type, &mut &data[..]).unwrap_or_else(
+                        |err| {
+                            let hex_data = hex::encode(data.clone());
+                            println!(
+                                "rlp message with id {:?} failed to decode: {:?}",
+                                id, hex_data
+                            );
+                            // hack to panic only if we fail to decode a message
+                            panic!("Failed to decode message: {:?}", err);
+                        },
+                    );
 
-                let protocol_message = ProtocolMessage::decode_message(message_type, &mut &data[..]).unwrap();
-
-                if let Err(reason) = self.handle_eth_message(peer, protocol_message.message).await {
+                if let Err(reason) = self
+                    .handle_eth_message(peer, protocol_message.message)
+                    .await
+                {
                     debug!("Error handling devp2p message: {}! Kicking peer.", reason);
                     self.disconnect_peer(peer).await;
                 }
@@ -545,11 +640,14 @@ mod test {
 
     use crate::P2PRelay;
     use akula::{p2p::node::PeerId, sentry::devp2p::OutboundEvent};
-    use hex_literal::hex;
-    use ethereum_forkid::{ForkId, ForkHash};
-    use ethp2p_rs::{Status, EthVersion, RequestPair, GetBlockHeaders, BlockHashOrNumber, ProtocolMessage, EthMessageID, EthMessage, BlockHeaders};
-    use foundry_config::Chain;
     use anvil_core::eth::block::Header;
+    use ethereum_forkid::{ForkHash, ForkId};
+    use ethp2p_rs::{
+        BlockHashOrNumber, BlockHeaders, EthMessage, EthMessageID, EthVersion, GetBlockHeaders,
+        ProtocolMessage, RequestPair, Status,
+    };
+    use foundry_config::Chain;
+    use hex_literal::hex;
     use ruint::Uint;
     use tokio::sync::broadcast::channel;
     use tower::Service;
@@ -573,11 +671,11 @@ mod test {
         };
 
         // first add the status, then we will modify the status
-        let mut relay = P2PRelay::new()
-            .with_status(status);
+        let mut relay = P2PRelay::new().with_status(status);
 
         let mut changed_status = status;
-        changed_status.blockhash = hex!("d4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3");
+        changed_status.blockhash =
+            hex!("d4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3");
         // double unwrap because we expect a status to be returned
         let response = relay.call(changed_status.into()).await.unwrap().unwrap();
 
@@ -600,8 +698,7 @@ mod test {
         };
 
         // first add the status, then we will modify the status
-        let mut relay = P2PRelay::new()
-            .with_status(status);
+        let relay = P2PRelay::new().with_status(status);
 
         let first_peer_id = PeerId::random();
         let (first_sender, first_receiver) = channel(1);
@@ -612,6 +709,7 @@ mod test {
             receiver: first_receiver,
         };
         relay.setup_peer(first_peer_id, first_peer);
+        relay.setup_peer_chain(first_peer_id, status.chain);
 
         let second_peer_id = PeerId::random();
         let (second_sender, second_receiver) = channel(1);
@@ -623,17 +721,21 @@ mod test {
             receiver: second_receiver,
         };
         relay.setup_peer(second_peer_id, second_peer);
+        relay.setup_peer_chain(second_peer_id, status.chain);
 
         let simple_get_block_headers = RequestPair {
             request_id: 0,
-            message:  GetBlockHeaders {
+            message: GetBlockHeaders {
                 start_block: BlockHashOrNumber::Number(0),
                 limit: 1,
                 skip: 0,
                 reverse: false,
             },
         };
-        relay.handle_eth_message(first_peer_id, simple_get_block_headers.clone().into()).await.unwrap();
+        relay
+            .handle_eth_message(first_peer_id, simple_get_block_headers.clone().into())
+            .await
+            .unwrap();
 
         // now we can check that the second peer got the message
         // unwrap because we expect a message to be returned
@@ -644,7 +746,8 @@ mod test {
 
         // convert the message
         let message_type = EthMessageID::try_from(received_relay.id).unwrap();
-        let received_message = ProtocolMessage::decode_message(message_type, &mut &received_relay.data[..]).unwrap();
+        let received_message =
+            ProtocolMessage::decode_message(message_type, &mut &received_relay.data[..]).unwrap();
         assert_eq!(received_message.message, simple_get_block_headers.into());
 
         let req_id = match received_message.message {
@@ -678,7 +781,10 @@ mod test {
         };
 
         // finally send the message
-        relay.handle_eth_message(second_peer_id, response.clone().into()).await.unwrap();
+        relay
+            .handle_eth_message(second_peer_id, response.clone().into())
+            .await
+            .unwrap();
 
         // now we can check that the first peer got the message
         // unwrap because we expect a message to be returned
@@ -689,7 +795,8 @@ mod test {
 
         // convert the message
         let message_type = EthMessageID::try_from(relayed_message.id).unwrap();
-        let final_response = ProtocolMessage::decode_message(message_type, &mut &relayed_message.data[..]).unwrap();
+        let final_response =
+            ProtocolMessage::decode_message(message_type, &mut &relayed_message.data[..]).unwrap();
         assert_eq!(final_response.message, response.into());
     }
 }

@@ -1,19 +1,20 @@
-use akula::{
-    sentry::{
-        devp2p::{
-            v4::NodeRecord, CapabilityId, CapabilityVersion, Discovery, Discv4, Discv4Builder,
-            DnsDiscovery, ListenOptions, NodeRecord as RLPNodeRecord, StaticNodes, Swarm,
-        },
-        eth::{capability_name, EthProtocolVersion},
+use akula::sentry::{
+    devp2p::{
+        v4::NodeRecord, CapabilityId, CapabilityVersion, Discovery, Discv4, Discv4Builder,
+        DnsDiscovery, ListenOptions, NodeRecord as RLPNodeRecord, StaticNodes, Swarm,
     },
+    eth::{capability_name, EthProtocolVersion},
 };
 use anyhow::Context;
 use cidr::IpCidr;
 use clap::Parser;
 use ethereum_forkid::{ForkHash, ForkId};
+use ethp2p_rs::{EthVersion, Status};
+use foundry_config::Chain;
 use hex_literal::hex;
 use maplit::btreemap;
 use ranger::relay::{MempoolListener, P2PRelay};
+use ruint::Uint;
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use std::collections::HashMap;
 use std::{num::NonZeroUsize, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
@@ -25,9 +26,6 @@ use tracing_subscriber::{
     prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter,
 };
 use trust_dns_resolver::TokioAsyncResolver;
-use ethp2p_rs::{Status, EthVersion};
-use foundry_config::Chain;
-use ruint::Uint;
 
 pub const BOOTNODES: &[&str] = &[
 	"enode://d860a01f9722d78051619d1e2351aba3f43f943f6f00718d1b9baa4101932a1f5011f16bb2b1bb35db20d6fe28fa0bf09636d26a87d31de9ec6203eeedb1f666@18.138.108.67:30303",   // bootnode-aws-ap-southeast-1-001
@@ -156,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_default()
         .is_empty()
     {
-        EnvFilter::new("sauron=trace,akula=info,relay=info")
+        EnvFilter::new("sauron=trace,akula=info,relay=debug")
     } else {
         EnvFilter::from_default_env()
     };
@@ -239,7 +237,6 @@ async fn main() -> anyhow::Result<()> {
 
     let status = Status {
         version: EthVersion::Eth67 as u8,
-        // ethers versions arent the same due to patches, so using Id here
         chain: Chain::Id(1),
         total_difficulty: Uint::from(36206751599115524359527u128),
         blockhash: hex!("feb27336ca7923f8fab3bd617fcb6e75841538f71c1bcfc267d7838489d9e13d"),
@@ -296,7 +293,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if let Some(hash) = hashes_stream.next().await {
-            info!("New tx hash! {:?}", hash.unwrap())
+            info!("New tx hash! {:?}", hex::encode(hash.unwrap()))
         }
 
         if let Some(new_tx) = tx_stream.next().await {
