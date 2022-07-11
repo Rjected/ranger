@@ -41,7 +41,11 @@ ethereum-types = "0.13"
 fdlimit = "0.2"
 cidr = "0.2.1"
 maplit = "1.0.2"
-secp256k1 = "0.22"
+secp256k1 = { version = "0.23", features = [
+  "global-context",
+  "rand-std",
+  "recovery",
+] }
 
 # for status
 ethp2p-rs = "0.1"
