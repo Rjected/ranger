@@ -41,7 +41,11 @@ ethereum-types = { version = "0.13" }
 fdlimit = { version = "0.2" }
 cidr = { version = "0.2.1" }
 maplit = { version = "1.0.2" }
-secp256k1 = { version = "0.22" }
+secp256k1 = { version = "0.23", features = [
+  "global-context",
+  "rand-std",
+  "recovery",
+] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1.5" }
