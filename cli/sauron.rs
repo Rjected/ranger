@@ -292,11 +292,11 @@ async fn main() -> anyhow::Result<()> {
             counter = 0;
         }
 
-        if let Some(hash) = hashes_stream.next().await {
+        while let Some(hash) = hashes_stream.next().await {
             info!("New tx hash! {:?}", hex::encode(hash.unwrap()))
         }
 
-        if let Some(new_tx) = tx_stream.next().await {
+        while let Some(new_tx) = tx_stream.next().await {
             info!("New tx! {:?}", new_tx.unwrap())
         }
 

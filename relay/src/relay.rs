@@ -599,6 +599,8 @@ impl CapabilityServer for P2PRelay {
                     }
                 };
 
+                debug!("Received rlp message with type {:?} from {:?}: {}", message_type, peer, hex::encode(data.clone()));
+
                 let protocol_message =
                     ProtocolMessage::decode_message(message_type, &mut &data[..]).unwrap_or_else(
                         |err| {
