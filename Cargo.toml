@@ -25,7 +25,6 @@ relay = { version = "^0.1.0", default-features = false, path = "./relay" }
 # Workaround - these are needed for akula to work as a dependency, since akula
 # itself uses these patches
 [patch.crates-io]
-enr = { git = "https://github.com/rust-ethereum/enr" }
 ethnum = { git = "https://github.com/vorot93/ethnum-rs", branch = "impls" }
 arrayvec = { git = "https://github.com/vorot93/arrayvec", branch = "pop-unchecked" }
 ethp2p-rs = { path = "../ethp2p-rs" }
