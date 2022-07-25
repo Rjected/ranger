@@ -10,7 +10,7 @@ use anvil_core::eth::{block::Block, transaction::TypedTransaction};
 use arrayvec::{ArrayString, CapacityError};
 use async_trait::async_trait;
 use ethers::core::types::{ParseChainError, H512};
-use ethp2p_rs::{
+use ethp2p::{
     EthMessage, EthMessageID, GetPooledTransactions, ProtocolMessage, RequestPair, Status,
 };
 use fastrlp::Encodable;

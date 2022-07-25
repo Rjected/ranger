@@ -1,5 +1,5 @@
 use crate::{P2PRelay, P2PRelayError};
-use ethp2p_rs::EthMessage;
+use ethp2p::EthMessage;
 use std::{
     future::Future,
     pin::Pin,

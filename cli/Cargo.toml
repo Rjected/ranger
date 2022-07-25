@@ -19,8 +19,8 @@ serde = { version = "1.0.126", features = ["derive"] }
 # can be upstreamed
 tracing = { version = "0.1.29", default-features = false }
 akula = { git = "https://github.com/akula-bft/akula" }
-fastrlp = { git = "https://github.com/vorot93/fastrlp" }
 ethereum-forkid = { version = "0.10.0", default-features = false }
+fastrlp = { version = "0.1.3", features = ["alloc", "derive", "std"] }
 rlp-derive = { version = "0.1.0", default-features = false }
 rlp = { version = "0.5.1", default-features = false }
 futures-core = "0.3.21"
@@ -48,9 +48,8 @@ secp256k1 = { version = "0.23", features = [
 ] }
 
 # for status
-ethp2p-rs = "0.1"
+ethp2p = { git = "https://github.com/rjected/ethp2p" }
 anvil = { git = "http://github.com/foundry-rs/foundry" }
-ethereum-forkid = { version = "0.8.0", default-features = false }
 foundry-config = { git = "http://github.com/foundry-rs/foundry" }
 anvil-core = { git = "https://github.com/foundry-rs/foundry" }
 ethers = { git = "https://github.com/gakonst/ethers-rs", features = ["abigen", "legacy", "ws"] }

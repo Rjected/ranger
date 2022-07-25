@@ -27,9 +27,3 @@ relay = { version = "^0.1.0", default-features = false, path = "./relay" }
 [patch.crates-io]
 ethnum = { git = "https://github.com/vorot93/ethnum-rs", branch = "impls" }
 arrayvec = { git = "https://github.com/vorot93/arrayvec", branch = "pop-unchecked" }
-ethp2p-rs = { path = "../ethp2p-rs" }
-
-[patch."https://github.com/foundry-rs/foundry"]
-anvil-core = { git = "https://github.com/rjected/foundry", branch = "fastrlp" }
-anvil = { git = "https://github.com/rjected/foundry", branch = "fastrlp" }
-foundry-config = { git = "https://github.com/rjected/foundry", branch = "fastrlp" }

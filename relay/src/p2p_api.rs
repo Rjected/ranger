@@ -1,6 +1,6 @@
 use anvil_core::eth::{block::Block, transaction::TypedTransaction};
 use async_trait::async_trait;
-use ethp2p_rs::EthMessage;
+use ethp2p::EthMessage;
 use futures_core::Stream;
 use std::{collections::HashSet, error::Error, fmt::Debug, hash::Hash};
 use tokio::sync::broadcast::{self, error::SendError, Sender};
