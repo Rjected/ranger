@@ -17,8 +17,6 @@ ethers-rs types
 [dependencies]
 serde = { version = "1.0.126", features = ["derive"] }
 
-# TODO: condense extra features needed and determine if necessary, or if they
-# can be upstreamed
 async-trait = "0.1"
 tracing = { version = "0.1.29", default-features = false }
 akula = { git = "https://github.com/akula-bft/akula" }
@@ -55,7 +53,6 @@ ethp2p = { git = "https://github.com/rjected/ethp2p" }
 anvil = { git = "http://github.com/foundry-rs/foundry" }
 anvil-core = { git = "https://github.com/foundry-rs/foundry" }
 fastrlp = { version = "0.1.3", features = ["alloc", "derive", "std"] }
-ethereum-forkid = { version = "0.8.0", default-features = false }
 ethers = { git = "https://github.com/gakonst/ethers-rs", features = ["abigen", "legacy", "ws"] }
 
 # chain match
