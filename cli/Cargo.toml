@@ -22,7 +22,7 @@ ranger = { path = "../" }
 tracing = { version = "0.1.29", default-features = false }
 akula = { git = "https://github.com/akula-bft/akula" }
 fastrlp = { git = "https://github.com/vorot93/fastrlp" }
-ethereum-forkid = { version = "0.8.0", default-features = false }
+ethereum-forkid = { version = "0.10.0", default-features = false }
 rlp-derive = { version = "0.1.0", default-features = false }
 rlp = { version = "0.5.1", default-features = false }
 futures-core = { version = "0.3.21" }
