@@ -15,17 +15,10 @@ ethers-rs types
 """
 
 [dependencies]
-ethers = { git = "https://github.com/gakonst/ethers-rs", features = ["abigen", "legacy", "ws"] }
 serde = { version = "1.0.126", features = ["derive"] }
 
-# TODO: condense extra features needed and determine if necessary, or if they
-# can be upstreamed
 async-trait = "0.1"
 tracing = { version = "0.1.29", default-features = false }
-fastrlp = { git = "https://github.com/vorot93/fastrlp", features = [
-    "derive",
-] }
-anvil = { git = "http://github.com/foundry-rs/foundry" }
 akula = { git = "https://github.com/akula-bft/akula" }
 ethereum-forkid = { version = "0.10.0", default-features = false }
 rlp-derive = { version = "0.1.0", default-features = false }
@@ -54,5 +47,27 @@ secp256k1 = { version = "0.23", features = [
   "rand-std",
   "recovery",
 ] }
+
+# for p2p types
+ethp2p = { git = "https://github.com/rjected/ethp2p" }
+anvil = { git = "http://github.com/foundry-rs/foundry" }
+anvil-core = { git = "https://github.com/foundry-rs/foundry" }
+fastrlp = { version = "0.1.3", features = ["alloc", "derive", "std"] }
+ethers = { git = "https://github.com/gakonst/ethers-rs", features = ["abigen", "legacy", "ws"] }
+
+# chain match
+foundry-config = { git = "http://github.com/foundry-rs/foundry" }
+
+# for tower-rlpx
+tower = { version = "0.4", features = ["full"] }
+
+# for a string
+arrayvec = { version = "0.7", features = ["serde"] }
+
+[dev-dependencies]
+# for status
+foundry-config = { git = "http://github.com/foundry-rs/foundry" }
+ruint = { git = "https://github.com/recmo/uint", features = ["fastrlp", "serde"] }
+hex-literal = "0.3.4"
 
 [lib]

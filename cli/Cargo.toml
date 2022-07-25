@@ -13,42 +13,51 @@ How to use ethers and other tooling to listen to the p2p network
 """
 
 [dependencies]
-ethers = { git = "https://github.com/gakonst/ethers-rs", features = ["abigen", "legacy", "ws"] }
 serde = { version = "1.0.126", features = ["derive"] }
-ranger = { path = "../" }
 
 # TODO: condense extra features needed and determine if necessary, or if they
 # can be upstreamed
 tracing = { version = "0.1.29", default-features = false }
 akula = { git = "https://github.com/akula-bft/akula" }
-fastrlp = { git = "https://github.com/vorot93/fastrlp" }
 ethereum-forkid = { version = "0.10.0", default-features = false }
+fastrlp = { version = "0.1.3", features = ["alloc", "derive", "std"] }
 rlp-derive = { version = "0.1.0", default-features = false }
 rlp = { version = "0.5.1", default-features = false }
-futures-core = { version = "0.3.21" }
-async-stream = { version = "0.3.2" }
-tokio-stream = { version = "0.1" }
+futures-core = "0.3.21"
+async-stream = "0.3.2"
+tokio-stream = "0.1"
 parking_lot = { version = "0.12.0", default-features = false }
 bytes = { version = "1.1", default-features = false }
 tracing-subscriber = { version = "0.3.11", default-features = false }
-trust-dns-resolver = { version = "0.21" }
+trust-dns-resolver = "0.21"
+
 # determine if necessary
 task-group = { git = "https://github.com/vorot93/task-group" }
-hex = { version = "0.4" }
-clap = { version = "3.1.5" }
-anyhow = { version = "1.0" }
-ethereum-types = { version = "0.13" }
-fdlimit = { version = "0.2" }
-cidr = { version = "0.2.1" }
-maplit = { version = "1.0.2" }
+hex = "0.4"
+hex-literal = "0.3.4"
+clap = "3.1.5"
+anyhow = "1.0"
+ethereum-types = "0.13"
+fdlimit = "0.2"
+cidr = "0.2.1"
+maplit = "1.0.2"
 secp256k1 = { version = "0.23", features = [
   "global-context",
   "rand-std",
   "recovery",
 ] }
 
+# for status
+ethp2p = { git = "https://github.com/rjected/ethp2p" }
+anvil = { git = "http://github.com/foundry-rs/foundry" }
+foundry-config = { git = "http://github.com/foundry-rs/foundry" }
+anvil-core = { git = "https://github.com/foundry-rs/foundry" }
+ethers = { git = "https://github.com/gakonst/ethers-rs", features = ["abigen", "legacy", "ws"] }
+ruint = { git = "https://github.com/recmo/uint", features = ["fastrlp", "serde"] }
+ranger = { path = "../" }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1.5" }
+tokio = "1.5"
 
 [[bin]]
 name = "sauron"

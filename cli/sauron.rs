@@ -1,19 +1,20 @@
-use akula::{
-    sentry::{
-        devp2p::{
-            v4::NodeRecord, CapabilityId, CapabilityVersion, Discovery, Discv4, Discv4Builder,
-            DnsDiscovery, ListenOptions, NodeRecord as RLPNodeRecord, StaticNodes, Swarm,
-        },
-        eth::{capability_name, EthProtocolVersion},
+use akula::sentry::{
+    devp2p::{
+        v4::NodeRecord, CapabilityId, CapabilityVersion, Discovery, Discv4, Discv4Builder,
+        DnsDiscovery, ListenOptions, NodeRecord as RLPNodeRecord, StaticNodes, Swarm,
     },
+    eth::{capability_name, EthProtocolVersion},
 };
 use anyhow::Context;
 use cidr::IpCidr;
 use clap::Parser;
 use ethereum_forkid::{ForkHash, ForkId};
-use ethereum_types::H256;
+use ethp2p_rs::{EthVersion, Status};
+use foundry_config::Chain;
+use hex_literal::hex;
 use maplit::btreemap;
 use ranger::relay::{MempoolListener, P2PRelay};
+use ruint::Uint;
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use std::collections::HashMap;
 use std::{num::NonZeroUsize, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
@@ -153,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_default()
         .is_empty()
     {
-        EnvFilter::new("sauron=trace,akula=info,relay=info")
+        EnvFilter::new("sauron=trace,akula=info,relay=debug")
     } else {
         EnvFilter::from_default_env()
     };
@@ -234,93 +235,20 @@ async fn main() -> anyhow::Result<()> {
 
     let tasks = Arc::new(TaskGroup::new());
 
-    let protocol_version = EthProtocolVersion::Eth66;
-
-    // We need to set the status so we can start discovering new peers
-    // Got these from peers, should come up with a way to bootstrap these messages once we're
-    // connected
-    // also the U256 is a re-export of ethereum_types, but we can't use it directly for some reason
-    // let _one_status_message = StatusMessage {
-    //     protocol_version: EthProtocolVersion::Eth66 as usize,
-    //     network_id: 1,
-    //     total_difficulty: akula::models::U256::from_str_radix("36206751599115524359527", 10)
-    //         .unwrap(),
-    //     best_hash: H256::from_str(
-    //         "0xfeb27336ca7923f8fab3bd617fcb6e75841538f71c1bcfc267d7838489d9e13d",
-    //     )
-    //     .unwrap(),
-    //     genesis_hash: H256::from_str(
-    //         "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3",
-    //     )
-    //     .unwrap(),
-    //     fork_id: ForkId {
-    //         hash: ForkHash([0xb7, 0x15, 0x07, 0x7d]),
-    //         next: 0,
-    //     },
-    // };
-
-    // let two_status_message = StatusMessage {
-    //     protocol_version: EthProtocolVersion::Eth66 as usize,
-    //     network_id: 1,
-    //     total_difficulty: akula::models::U256::from_str_radix("36206751599115524359527", 10)
-    //         .unwrap(),
-    //     best_hash: H256::from_str(
-    //         "0xdeb6f5f89b9592aa8efbf156d7287664cf43f2464d4d7580722dc0b8b80b94ee",
-    //     )
-    //     .unwrap(),
-    //     genesis_hash: H256::from_str(
-    //         "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3",
-    //     )
-    //     .unwrap(),
-    //     fork_id: ForkId {
-    //         hash: ForkHash([0xb7, 0x15, 0x07, 0x7d]),
-    //         next: 0,
-    //     },
-    // };
-
-    // let _another_status_message = StatusMessage {
-    //     protocol_version: EthProtocolVersion::Eth66 as usize,
-    //     network_id: 1,
-    //     total_difficulty: akula::models::U256::from_str_radix("6088371363059432", 10).unwrap(),
-    //     best_hash: H256::from_str(
-    //         "0xce585e7a973311b8db0470a1739ab9eddb38d7edfe3562c5f9eae1d86518d816",
-    //     )
-    //     .unwrap(),
-    //     genesis_hash: H256::from_str(
-    //         "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3",
-    //     )
-    //     .unwrap(),
-    //     fork_id: ForkId {
-    //         hash: ForkHash([0xb7, 0x15, 0x07, 0x7d]),
-    //         next: 0,
-    //     },
-    // };
-
-    // this status message uses a best_hash of the genesis so we don't get asked for headers by
-    // peers.
-    // This is a temporary measure until we can properly relay headers and blocks
-    // let genesis_status = StatusMessage {
-    //     protocol_version: EthProtocolVersion::Eth66 as usize,
-    //     network_id: 1,
-    //     total_difficulty: akula::models::U256::from_str_radix("0", 10).unwrap(),
-    //     best_hash: H256::from_str(
-    //         "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3",
-    //     )
-    //     .unwrap(),
-    //     genesis_hash: H256::from_str(
-    //         "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3",
-    //     )
-    //     .unwrap(),
-    //     // even though the ForkHash contains hashes that a peer with this status wouldn't know (our
-    //     // best_hash is genesis!), we can still use the most recent forkHash
-    //     fork_id: ForkId {
-    //         hash: ForkHash([0xb7, 0x15, 0x07, 0x7d]),
-    //         next: 0,
-    //     },
-    // };
+    let status = Status {
+        version: EthVersion::Eth67 as u8,
+        chain: Chain::Id(1),
+        total_difficulty: Uint::from(36206751599115524359527u128),
+        blockhash: hex!("feb27336ca7923f8fab3bd617fcb6e75841538f71c1bcfc267d7838489d9e13d"),
+        genesis: hex!("d4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3"),
+        forkid: ForkId {
+            hash: ForkHash([0xb7, 0x15, 0x07, 0x7d]),
+            next: 0,
+        },
+    };
 
     // tell the relay to use this status message
-    let relay = P2PRelay::new(protocol_version);
+    let relay = P2PRelay::new().with_status(status);
     let relay = Arc::new(relay);
     let no_new_peers = relay.no_new_peers_handle();
 
@@ -328,6 +256,7 @@ async fn main() -> anyhow::Result<()> {
         .with_task_group(tasks.clone())
         .with_listen_options(ListenOptions::new(
             discovery_tasks,
+            0, // min_peers
             opts.max_peers,
             listen_addr.parse().unwrap(),
             opts.cidr,
@@ -336,7 +265,7 @@ async fn main() -> anyhow::Result<()> {
         .with_client_version(format!("sneakyboi/v{}", env!("CARGO_PKG_VERSION")))
         .build(
             btreemap! {
-                CapabilityId { name: capability_name(), version: protocol_version as CapabilityVersion } => 17,
+                CapabilityId { name: capability_name(), version: EthProtocolVersion::Eth66 as CapabilityVersion } => 17,
             },
             relay.clone(),
             secret_key,
@@ -363,13 +292,13 @@ async fn main() -> anyhow::Result<()> {
             counter = 0;
         }
 
-        // if let Some(hash) = hashes_stream.next().await {
-        //     info!("New tx hash! {:?}", hash.unwrap())
-        // }
+        while let Some(hash) = hashes_stream.next().await {
+            info!("New tx hash! {:?}", hex::encode(hash.unwrap()))
+        }
 
-        // if let Some(new_tx) = tx_stream.next().await {
-        //     info!("New tx! {:?}", new_tx.unwrap())
-        // }
+        while let Some(new_tx) = tx_stream.next().await {
+            info!("New tx! {:?}", new_tx.unwrap())
+        }
 
         sleep(Duration::from_millis(20)).await;
     }
