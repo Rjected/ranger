@@ -1,10 +1,12 @@
-use devp2p_rs::{
-    disc::dns::Resolver, v4::{NodeRecord, Node}, CapabilityId, CapabilityVersion, Discovery, Discv4,
-    Discv4Builder, DnsDiscovery, ListenOptions, NodeRecord as RLPNodeRecord, StaticNodes, Swarm, CapabilityName,
-};
 use anyhow::Context;
 use cidr::IpCidr;
 use clap::Parser;
+use devp2p_rs::{
+    disc::dns::Resolver,
+    v4::{Node, NodeRecord},
+    CapabilityId, CapabilityName, CapabilityVersion, Discovery, Discv4, Discv4Builder,
+    DnsDiscovery, ListenOptions, NodeRecord as RLPNodeRecord, StaticNodes, Swarm,
+};
 use ethereum_forkid::{ForkHash, ForkId};
 use ethp2p::{EthVersion, Status};
 use foundry_config::Chain;
@@ -178,8 +180,7 @@ async fn main() -> anyhow::Result<()> {
     info!(
         "Node ID: {}",
         hex::encode(
-            devp2p_rs::util::pk2id(&PublicKey::from_secret_key(SECP256K1, &secret_key))
-                .as_bytes()
+            devp2p_rs::util::pk2id(&PublicKey::from_secret_key(SECP256K1, &secret_key)).as_bytes()
         )
     );
 
