@@ -18,9 +18,9 @@ serde = { version = "1.0.126", features = ["derive"] }
 # TODO: condense extra features needed and determine if necessary, or if they
 # can be upstreamed
 tracing = { version = "0.1.29", default-features = false }
-akula = { git = "https://github.com/akula-bft/akula" }
 ethereum-forkid = { version = "0.10.0", default-features = false }
 fastrlp = { version = "0.1.3", features = ["alloc", "derive", "std"] }
+devp2p-rs = { git = "https://github.com/rjected/devp2p-rs" }
 rlp-derive = { version = "0.1.0", default-features = false }
 rlp = { version = "0.5.1", default-features = false }
 futures-core = "0.3.21"
