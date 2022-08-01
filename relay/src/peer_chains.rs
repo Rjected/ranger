@@ -1,6 +1,6 @@
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 
-use akula::p2p::node::PeerId;
+use devp2p_rs::PeerId;
 use foundry_config::Chain;
 
 /// Data structure which maps a peer to its chain, and the chain to the set of peers on that chain.
