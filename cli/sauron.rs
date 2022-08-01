@@ -147,8 +147,6 @@ impl OptsDiscV4 {
 /// ```
 async fn main() -> anyhow::Result<()> {
     let opts: Opts = Opts::parse();
-    fdlimit::raise_fd_limit();
-
     let filter = if std::env::var(EnvFilter::DEFAULT_ENV)
         .unwrap_or_default()
         .is_empty()
