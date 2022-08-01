@@ -22,7 +22,6 @@ members = [
 [dependencies]
 relay = { version = "^0.1.0", default-features = false, path = "./relay" }
 
-
 # Workaround - these are needed for akula to work as a dependency, since akula
 # itself uses these patches
 [patch.crates-io]
