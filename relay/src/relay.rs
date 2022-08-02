@@ -2,13 +2,13 @@ use crate::{
     p2p_api::{DedupStream, MempoolListener},
     PeerChains,
 };
-use akula::sentry::devp2p::{
-    CapabilityName, CapabilityServer, CapabilityVersion, DisconnectReason, InboundEvent,
-    Message as DevP2PMessage, OutboundEvent, PeerId,
-};
 use anvil_core::eth::{block::Block, transaction::TypedTransaction};
 use arrayvec::{ArrayString, CapacityError};
 use async_trait::async_trait;
+use devp2p_rs::{
+    CapabilityName, CapabilityServer, CapabilityVersion, DisconnectReason, InboundEvent,
+    Message as DevP2PMessage, OutboundEvent, PeerId,
+};
 use ethers::core::types::{ParseChainError, H512};
 use ethp2p::{
     EthMessage, EthMessageID, GetPooledTransactions, ProtocolMessage, RequestPair, Status,
@@ -599,7 +599,12 @@ impl CapabilityServer for P2PRelay {
                     }
                 };
 
-                debug!("Received rlp message with type {:?} from {:?}: {}", message_type, peer, hex::encode(data.clone()));
+                debug!(
+                    "Received rlp message with type {:?} from {:?}: {}",
+                    message_type,
+                    peer,
+                    hex::encode(data.clone())
+                );
 
                 let protocol_message =
                     ProtocolMessage::decode_message(message_type, &mut &data[..]).unwrap_or_else(
@@ -641,10 +646,10 @@ mod test {
     use std::convert::TryFrom;
 
     use crate::P2PRelay;
-    use akula::{p2p::node::PeerId, sentry::devp2p::OutboundEvent};
     use anvil_core::eth::block::Header;
+    use devp2p_rs::{OutboundEvent, PeerId};
     use ethereum_forkid::{ForkHash, ForkId};
-    use ethp2p_rs::{
+    use ethp2p::{
         BlockHashOrNumber, BlockHeaders, EthMessage, EthMessageID, EthVersion, GetBlockHeaders,
         ProtocolMessage, RequestPair, Status,
     };

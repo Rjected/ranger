@@ -1,22 +1,21 @@
-use akula::sentry::{
-    devp2p::{
-        v4::NodeRecord, CapabilityId, CapabilityVersion, Discovery, Discv4, Discv4Builder,
-        DnsDiscovery, ListenOptions, NodeRecord as RLPNodeRecord, StaticNodes, Swarm,
-    },
-    eth::{capability_name, EthProtocolVersion},
-};
 use anyhow::Context;
 use cidr::IpCidr;
 use clap::Parser;
+use devp2p_rs::{
+    disc::dns::Resolver,
+    v4::{Node, NodeRecord},
+    CapabilityId, CapabilityName, CapabilityVersion, Discovery, Discv4, Discv4Builder,
+    DnsDiscovery, ListenOptions, NodeRecord as RLPNodeRecord, StaticNodes, Swarm,
+};
 use ethereum_forkid::{ForkHash, ForkId};
-use ethp2p_rs::{EthVersion, Status};
+use ethp2p::{EthVersion, Status};
 use foundry_config::Chain;
 use hex_literal::hex;
 use maplit::btreemap;
 use ranger::relay::{MempoolListener, P2PRelay};
-use ruint::Uint;
+use ruint::uint;
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
-use std::collections::HashMap;
+use std::{collections::HashMap, convert::TryInto};
 use std::{num::NonZeroUsize, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 use task_group::TaskGroup;
 use tokio::time::sleep;
@@ -109,7 +108,7 @@ impl OptsDiscV4 {
             info!("Using default discv4 bootstrap nodes");
         }
 
-        let node = akula::sentry::devp2p::disc::v4::Node::new(
+        let node = Node::new(
             format!("0.0.0.0:{}", self.discv4_port).parse().unwrap(),
             *secret_key,
             bootstrap_nodes,
@@ -148,13 +147,11 @@ impl OptsDiscV4 {
 /// ```
 async fn main() -> anyhow::Result<()> {
     let opts: Opts = Opts::parse();
-    fdlimit::raise_fd_limit();
-
     let filter = if std::env::var(EnvFilter::DEFAULT_ENV)
         .unwrap_or_default()
         .is_empty()
     {
-        EnvFilter::new("sauron=trace,akula=info,relay=debug")
+        EnvFilter::new("sauron=trace,devp2p_rs=info,relay=debug")
     } else {
         EnvFilter::from_default_env()
     };
@@ -181,8 +178,7 @@ async fn main() -> anyhow::Result<()> {
     info!(
         "Node ID: {}",
         hex::encode(
-            akula::sentry::devp2p::util::pk2id(&PublicKey::from_secret_key(SECP256K1, &secret_key))
-                .as_bytes()
+            devp2p_rs::util::pk2id(&PublicKey::from_secret_key(SECP256K1, &secret_key)).as_bytes()
         )
     );
 
@@ -196,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
         if !opts.no_dns_discovery {
             info!("Starting DNS discovery fetch from {}", opts.dnsdisc_address);
 
-            let dns_resolver = akula::sentry::devp2p::disc::dns::Resolver::new(Arc::new(
+            let dns_resolver = Resolver::new(Arc::new(
                 TokioAsyncResolver::tokio_from_system_conf()
                     .context("Failed to start DNS resolver")?,
             ));
@@ -238,7 +234,7 @@ async fn main() -> anyhow::Result<()> {
     let status = Status {
         version: EthVersion::Eth67 as u8,
         chain: Chain::Id(1),
-        total_difficulty: Uint::from(36206751599115524359527u128),
+        total_difficulty: uint!(36206751599115524359527_U256),
         blockhash: hex!("feb27336ca7923f8fab3bd617fcb6e75841538f71c1bcfc267d7838489d9e13d"),
         genesis: hex!("d4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3"),
         forkid: ForkId {
@@ -265,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
         .with_client_version(format!("sneakyboi/v{}", env!("CARGO_PKG_VERSION")))
         .build(
             btreemap! {
-                CapabilityId { name: capability_name(), version: EthProtocolVersion::Eth66 as CapabilityVersion } => 17,
+                CapabilityId { name: CapabilityName("eth".try_into().unwrap()), version: EthVersion::Eth67 as CapabilityVersion } => 17,
             },
             relay.clone(),
             secret_key,
