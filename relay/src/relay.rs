@@ -30,6 +30,9 @@ use tokio::sync::broadcast::{channel, error::SendError, Receiver, Sender};
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tracing::{debug, info};
 
+// this is the soft response limit for eth protocol messages
+const MESSAGE_SIZE_LIMIT: usize = 2 * 1024 * 1024;
+
 /// Contains the sender and receiver structs for a peer.
 #[derive(Debug)]
 pub struct Pipes {
@@ -467,7 +470,6 @@ impl P2PRelay {
         RequestPair<T>: Into<EthMessage>,
     {
         // construct the in flight request info
-
         let request_key = InFlightRequest {
             new_request_id: request.request_id,
             peer_id: peer,
@@ -553,11 +555,6 @@ impl MempoolListener for P2PRelay {
         let hashes = self.hashes_stream.read();
         Ok(BroadcastStream::new(hashes.sender.subscribe()))
     }
-
-    fn subscribe_blocks(&self) -> Result<Self::BlockStream, Self::Error> {
-        // let blocks = self.blocks;
-        todo!()
-    }
 }
 
 #[async_trait]
@@ -592,12 +589,29 @@ impl CapabilityServer for P2PRelay {
                 let message_type = match EthMessageID::try_from(id) {
                     Ok(message_type) => message_type,
                     Err(error) => {
-                        debug!("Invalid Eth message ID: {}! Kicking peer.", error);
+                        {
+                            // just for the error case, we read the peer chains before
+                            // disconnecting. we make sure to drop the read lock before trying to
+                            // disconnect
+                            let peer_chains = self.peer_chains.read();
+                            let chain = peer_chains.get_chain(&peer).unwrap();
+                            debug!("Cannot convert from received id {} to messageid: {}! Kicking peer {}. peer was from chain {}.", id, error, peer, chain);
+                        }
                         self.disconnect_peer(peer).await;
                         // stop the program
                         return;
                     }
                 };
+
+                // check message size before handling
+                if data.len() > MESSAGE_SIZE_LIMIT {
+                    debug!(
+                        "Received message from {} with size {}. Message size is limited to {}.",
+                        peer, data.len(), MESSAGE_SIZE_LIMIT
+                    );
+                    self.disconnect_peer(peer).await;
+                    return;
+                }
 
                 debug!(
                     "Received rlp message with type {:?} from {:?}: {}",

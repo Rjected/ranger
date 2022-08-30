@@ -21,9 +21,6 @@ pub trait MempoolListener: Sync + Send {
 
     /// Subscribe to the incoming pending transaction hashes
     fn subscribe_pending_hashes(&self) -> Result<Self::TxHashStream, Self::Error>;
-
-    /// Subscribe to incoming blocks
-    fn subscribe_blocks(&self) -> Result<Self::BlockStream, Self::Error>;
 }
 
 /// Represents an eth protocol message and an associated peer
