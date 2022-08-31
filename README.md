@@ -15,4 +15,5 @@ Ranger is separated into two parts currently:
      network, and traits for exposing mempool transactions as a `Stream`.
 
 ## Related projects
+ * [ethp2p](https://github.com/rjected/ethp2p), a library built for ranger, which is used for encoding and decoding [`eth`](https://github.com/ethereum/devp2p) messages.
  * [Sentry](https://github.com/akula-bft/akula/tree/master/src/sentry), which provides much of the code that we use to interact with eth p2p networking protocols.

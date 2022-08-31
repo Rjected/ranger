@@ -1,3 +1,4 @@
+use anvil::Hardfork;
 use anyhow::Context;
 use cidr::IpCidr;
 use clap::Parser;
@@ -7,7 +8,6 @@ use devp2p_rs::{
     CapabilityId, CapabilityName, CapabilityVersion, Discovery, Discv4, Discv4Builder,
     DnsDiscovery, ListenOptions, NodeRecord as RLPNodeRecord, StaticNodes, Swarm,
 };
-use ethereum_forkid::{ForkHash, ForkId};
 use ethp2p::{EthVersion, Status};
 use foundry_config::Chain;
 use hex_literal::hex;
@@ -237,10 +237,7 @@ async fn main() -> anyhow::Result<()> {
         total_difficulty: uint!(36206751599115524359527_U256),
         blockhash: hex!("feb27336ca7923f8fab3bd617fcb6e75841538f71c1bcfc267d7838489d9e13d"),
         genesis: hex!("d4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3"),
-        forkid: ForkId {
-            hash: ForkHash([0xb7, 0x15, 0x07, 0x7d]),
-            next: 0,
-        },
+        forkid: Hardfork::Latest.fork_id(),
     };
 
     // tell the relay to use this status message
@@ -252,16 +249,24 @@ async fn main() -> anyhow::Result<()> {
         .with_task_group(tasks.clone())
         .with_listen_options(ListenOptions::new(
             discovery_tasks,
-            0, // min_peers
+            opts.max_peers.into(), // if num_peers > min_peers, then there is only one dial worker (this
+                            // is an implementation detail of the swarm). so let's set min_peers
+                            // very high, so we actually USE dialer tasks rather than have only one
+                            // worker.
+                            // this is one issue i have with designing the devp2p api around task
+                            // groups - it exposes too many implementation details about
+                            // the concurrency paradigm to the user.
+                            // min_peers also seems useless, because that's all it's used for.
             opts.max_peers,
             listen_addr.parse().unwrap(),
             opts.cidr,
-            no_new_peers,
+            no_new_peers, // this should be changed to be static - are there good reasons for it not being static?
         ))
         .with_client_version(format!("sneakyboi/v{}", env!("CARGO_PKG_VERSION")))
         .build(
             btreemap! {
-                CapabilityId { name: CapabilityName("eth".try_into().unwrap()), version: EthVersion::Eth67 as CapabilityVersion } => 17,
+                CapabilityId { name: CapabilityName("eth".try_into().unwrap()), version: EthVersion::Eth66 as CapabilityVersion } => 17,
+                CapabilityId { name: CapabilityName("eth".try_into().unwrap()), version: EthVersion::Eth67 as CapabilityVersion } => 15, // on bsc this is 18 lol
             },
             relay.clone(),
             secret_key,
