@@ -20,7 +20,7 @@ devp2p-rs = { git = "https://github.com/rjected/devp2p-rs" }
 tokio-stream = { version = "0.1.9", features = ["sync"] }
 bytes = { version = "1.1", default-features = false }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "std"] }
-trust-dns-resolver = "0.21"
+trust-dns-resolver = "0.22"
 task-group = { git = "https://github.com/vorot93/task-group" }
 hex = "0.4"
 hex-literal = "0.3.4"
