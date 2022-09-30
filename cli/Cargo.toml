@@ -24,7 +24,7 @@ trust-dns-resolver = "0.22"
 task-group = { git = "https://github.com/vorot93/task-group" }
 hex = "0.4"
 hex-literal = "0.3.4"
-clap = "3.1.5"
+clap = "4.0.4"
 anyhow = "1.0"
 cidr = "0.2.1"
 maplit = "1.0.2"
