@@ -607,7 +607,9 @@ impl CapabilityServer for P2PRelay {
                 if data.len() > MESSAGE_SIZE_LIMIT {
                     debug!(
                         "Received message from {} with size {}. Message size is limited to {}.",
-                        peer, data.len(), MESSAGE_SIZE_LIMIT
+                        peer,
+                        data.len(),
+                        MESSAGE_SIZE_LIMIT
                     );
                     self.disconnect_peer(peer).await;
                     return;
