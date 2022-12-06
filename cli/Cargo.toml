@@ -15,7 +15,7 @@ How to use ethers and other tooling to listen to the p2p network
 [dependencies]
 tracing = { version = "0.1.29", default-features = false }
 ethereum-forkid = { version = "0.11.0", default-features = false }
-fastrlp = { version = "0.1.3", features = ["alloc", "derive", "std"] }
+open-fastrlp = { version = "0.1.4", features = ["alloc", "derive", "std"] }
 devp2p-rs = { git = "https://github.com/rjected/devp2p-rs" }
 tokio-stream = { version = "0.1.9", features = ["sync"] }
 bytes = { version = "1.1", default-features = false }
