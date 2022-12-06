@@ -21,7 +21,3 @@ members = [
 
 [dependencies]
 relay = { version = "^0.1.0", default-features = false, path = "./relay" }
-
-# temp
-[patch.crates-io]
-revm = { git = "https://github.com/bluealloy/revm" }
