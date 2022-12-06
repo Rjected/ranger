@@ -13,8 +13,8 @@ use ethers::core::types::{ParseChainError, H512};
 use ethp2p::{
     EthMessage, EthMessageID, GetPooledTransactions, ProtocolMessage, RequestPair, Status,
 };
-use fastrlp::Encodable;
 use foundry_config::Chain;
+use open_fastrlp::Encodable;
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
