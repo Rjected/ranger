@@ -13,8 +13,8 @@ use ethers::core::types::{ParseChainError, H512};
 use ethp2p::{
     EthMessage, EthMessageID, GetPooledTransactions, ProtocolMessage, RequestPair, Status,
 };
-use fastrlp::Encodable;
 use foundry_config::Chain;
+use open_fastrlp::Encodable;
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
@@ -607,7 +607,9 @@ impl CapabilityServer for P2PRelay {
                 if data.len() > MESSAGE_SIZE_LIMIT {
                     debug!(
                         "Received message from {} with size {}. Message size is limited to {}.",
-                        peer, data.len(), MESSAGE_SIZE_LIMIT
+                        peer,
+                        data.len(),
+                        MESSAGE_SIZE_LIMIT
                     );
                     self.disconnect_peer(peer).await;
                     return;
