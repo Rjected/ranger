@@ -28,7 +28,7 @@ clap = "4.0.4"
 anyhow = "1.0"
 cidr = "0.2.1"
 maplit = "1.0.2"
-secp256k1 = { version = "0.25", features = [
+secp256k1 = { version = "0.27", features = [
   "global-context",
   "rand-std",
   "recovery",
