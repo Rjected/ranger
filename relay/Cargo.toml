@@ -41,6 +41,6 @@ tower = { version = "0.4", features = ["full"] }
 
 [dev-dependencies]
 ruint = { version = "1.3.0", features = ["fastrlp"] }
-hex-literal = "0.3.4"
+hex-literal = "0.4.0"
 
 [lib]
