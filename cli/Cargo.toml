@@ -23,7 +23,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "std"] }
 trust-dns-resolver = "0.22"
 task-group = { git = "https://github.com/vorot93/task-group" }
 hex = "0.4"
-hex-literal = "0.3.4"
+hex-literal = "0.4.1"
 clap = "4.0.4"
 anyhow = "1.0"
 cidr = "0.2.1"
